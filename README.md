@@ -52,6 +52,11 @@ shared memory. Minecraft runs hidden in the background, and Skyrim draws everyth
 | [SKSE64](https://skse.silverlock.org/) | For your game version |
 | [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444) | The "All in one (Anniversary Edition)" file |
 
+> **Heavily recommended: [Alternate Start - Live Another Life](https://www.nexusmods.com/skyrimspecialedition/mods/272).**
+> Skyrim's opening (the cart ride and Helgen) is heavily scripted and may not work with SkyCraft,
+> so you can get stuck. Alternate Start skips it and lets you choose where your new character
+> begins. Otherwise, play from a save made after Helgen.
+
 **Minecraft**
 
 You only need **a Microsoft account that owns Minecraft: Java Edition**. SkyCraft comes with
@@ -136,6 +141,8 @@ Every other key is Minecraft's: **E** inventory, **F5** camera, **T** chat, **/*
 - If something goes wrong, `Documents\My Games\Skyrim Special Edition\SKSE\SkyCraft.log` says what.
   For bug reports, set `bDiagnostics = 1` in `SkyCraft.ini` for detailed logs.
 
+- Skyrim's opening (cart ride and Helgen) may leave you stuck. Use
+  [Alternate Start](https://www.nexusmods.com/skyrimspecialedition/mods/272) or a save made after Helgen.
 - Skyrim's inventory, magic, shouts and perks can't be opened while Minecraft drives the player.
 - Minecraft hits only reach NPCs, not Skyrim objects such as the web around Arvel in Bleak Falls
   Barrow. There's no in-game switch back to plain Skyrim yet. Closing Minecraft hands control
