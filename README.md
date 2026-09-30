@@ -1,5 +1,7 @@
 # SkyCraft
 
+![SkyCraft: a Minecraft player walking through Riverwood with the Minecraft HUD](docs/screenshot.jpg)
+
 Play Skyrim as a Minecraft player. You move with Minecraft's physics, carry Minecraft's inventory
 and HUD, and place and break blocks in Skyrim's world. You fight Skyrim's NPCs with Minecraft
 weapons, and they fight back.
