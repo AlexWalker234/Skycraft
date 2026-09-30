@@ -51,7 +51,9 @@ namespace skycraft
 		float lookDx = 0.0f;
 		float lookDy = 0.0f;
 
-		// G on something Skyrim can activate (door, NPC, container, item) activates it in Skyrim.
+		// G on something Skyrim can activate (door, NPC, container, item, furniture) activates it in
+		// Skyrim. Furniture (chairs, beds, crafting stations, pull-bar levers) hands the player to
+		// Skyrim while it's used (Game.cpp, SkyrimTakeover).
 		void ActivateSkyrimTarget()
 		{
 			auto* pick = RE::CrosshairPickData::GetSingleton();
@@ -61,12 +63,7 @@ namespace skycraft
 			}
 			auto target = pick->GetActiveTarget().get();
 			if (!target || target.get() == player) {
-				return;
-			}
-			// Chairs, beds and crafting stations would sit the player down, but Minecraft owns
-			// the player's position; skip them.
-			if (auto* base = target->GetBaseObject(); base && base->Is(RE::FormType::Furniture)) {
-				logger::info("not activating furniture {:08X}", target->GetFormID());
+				logger::info("G: nothing to activate under the crosshair");
 				return;
 			}
 			target->ActivateRef(player, 0, nullptr, 0, false);
