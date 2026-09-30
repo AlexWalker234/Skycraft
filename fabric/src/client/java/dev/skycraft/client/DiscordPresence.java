@@ -115,7 +115,8 @@ public final class DiscordPresence {
 				party.addProperty("id", "skycraft-" + Integer.toHexString(joinable.hashCode()));
 				JsonArray size = new JsonArray();
 				size.add(Math.max(players, 1));
-				size.add(server != null ? Math.max(server.getMaxPlayers(), players + 1) : Math.max(8, players + 1));
+				// A friend's world: SkyCraft hosts take 100 (IntegratedServerMixin); a guest can't ask.
+				size.add(server != null ? Math.max(server.getMaxPlayers(), players + 1) : Math.max(100, players + 1));
 				party.add("size", size);
 				activity.add("party", party);
 				JsonObject secrets = new JsonObject();
