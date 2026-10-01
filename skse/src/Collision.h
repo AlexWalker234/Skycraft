@@ -31,26 +31,35 @@ namespace skycraft
 		void          CopyBoxes(const std::int32_t a_origin[3], const std::int32_t a_size[3], std::uint32_t* a_out) const;
 		std::uint32_t BoxesGeneration() const { return boxesGen_.load(); }
 
+		// Blocks dug out of (or back into) Skyrim's world: the regions around them are sent again,
+		// ahead of everything else, without Skyrim's diggable geometry in dug blocks. Main thread.
+		void DigChanged(const std::vector<std::array<int, 3>>& a_blocks);
+
 	private:
+		// flags: proto::ColTriFlags (kTriDiggable, the DigMaterial in bits 8-15).
 		struct Tri
 		{
-			float v[9];  // three vertices, MC space
+			float         v[9];  // three vertices, MC space
+			std::uint32_t flags{ 0 };
 		};
 		struct Obb
 		{
-			float c[3];
-			float axis[3][3];  // unit axes, MC space
-			float half[3];     // half extents incl. convex radius, blocks
+			float         c[3];
+			float         axis[3][3];  // unit axes, MC space
+			float         half[3];     // half extents incl. convex radius, blocks
+			std::uint32_t flags{ 0 };
 		};
 		struct Capsule
 		{
-			float a[3], b[3];
-			float r;
+			float         a[3], b[3];
+			float         r;
+			std::uint32_t flags{ 0 };
 		};
 		struct Convex
 		{
 			std::vector<std::array<float, 4>> planes;  // n.p + d <= 0 inside, MC space
 			float                             lo[3], hi[3];
+			std::uint32_t                     flags{ 0 };
 		};
 		struct Job
 		{
@@ -62,6 +71,13 @@ namespace skycraft
 			std::vector<Capsule> capsules;
 			std::vector<Convex>  convexes;
 			std::vector<Tri>     helperTris;  // stair ramps: sent as triangles only, never voxelized
+
+			// While collecting one body's shapes.
+			const RE::hkpShape*  top{ nullptr };
+			RE::TESObjectREFR*   ref{ nullptr };
+			bool                 diggable{ false };
+			bool                 terrain{ false };
+			bool                 tree{ false };
 		};
 		struct Body
 		{
@@ -69,12 +85,17 @@ namespace skycraft
 			const float*            xf;  // hkTransform (column-major rotation + translation)
 			float                   lo[3], hi[3];  // world AABB, MC space
 			bool                    helper;        // stair helper (triangles only)
+			bool                    diggable{ false };
+			bool                    terrain{ false };
+			bool                    tree{ false };
+			RE::TESObjectREFR*      ref{ nullptr };
 		};
 
 		void GatherBodies(RE::hkpWorld* a_world);
 		void Harvest(int a_rx, int a_ry, int a_rz);
-		void Collect(const RE::hkpShape* a_shape, const float* a_xf, const float a_lo[3], const float a_hi[3], Job& a_job, int a_depth);
-		void EmitAabbFallback(const RE::hkpShape* a_shape, const float* a_xf, Job& a_job);
+		void Collect(const RE::hkpShape* a_shape, const float* a_xf, const float a_lo[3], const float a_hi[3], Job& a_job, int a_depth, RE::hkpShapeKey a_key);
+		void EmitAabbFallback(const RE::hkpShape* a_shape, const float* a_xf, Job& a_job, RE::hkpShapeKey a_key);
+		std::uint32_t FlagsFor(const Job& a_job, RE::hkpShapeKey a_key) const;
 
 		void WorkerLoop();
 		void Voxelize(const Job& a_job);
@@ -89,6 +110,7 @@ namespace skycraft
 
 		std::atomic<std::uint32_t>                                     epoch_{ 0 };
 		std::unordered_map<std::uint64_t, std::chrono::steady_clock::time_point> harvested_;
+		std::vector<std::array<int, 3>>                                urgent_;  // regions to send again first
 		std::vector<Body>                                              bodies_;
 		std::vector<std::array<int, 3>>                                offsets_;
 		std::unordered_set<int>                                        loggedTypes_;

@@ -1,6 +1,7 @@
 #include "Game.h"
 
 #include <ExDisp.h>
+#include <TlHelp32.h>
 #include <ShlDisp.h>
 #include <ShlObj.h>
 #include <SimpleIni.h>
@@ -36,17 +37,6 @@ namespace skycraft::Launcher
 			wchar_t buf[MAX_PATH * 2];
 			const DWORD n = ::ExpandEnvironmentStringsW(a_path.c_str(), buf, static_cast<DWORD>(std::size(buf)));
 			return n > 0 && n <= std::size(buf) ? std::wstring(buf) : a_path;
-		}
-
-		// A Minecraft with the SkyCraft mod holds this mutex while it runs (SkyLink.announceRunning).
-		bool MinecraftRunning()
-		{
-			HANDLE mutex = ::OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\SkyCraft_v1_minecraft");
-			if (mutex) {
-				::CloseHandle(mutex);
-				return true;
-			}
-			return false;
 		}
 
 		// Runs a program the way double-clicking it would: started by the desktop's Explorer, not by
@@ -165,8 +155,25 @@ namespace skycraft::Launcher
 				return {};
 			}
 			// Prism's settings: only the first time (after that they're the player's).
-			if (!std::filesystem::exists(dir / "Prism" / "prismlauncher.cfg")) {
-				std::filesystem::copy_file(dir / "defaults" / "prismlauncher.cfg", dir / "Prism" / "prismlauncher.cfg", ec);
+			const auto cfg = dir / "Prism" / "prismlauncher.cfg";
+			if (!std::filesystem::exists(cfg)) {
+				std::filesystem::copy_file(dir / "defaults" / "prismlauncher.cfg", cfg, ec);
+			} else {
+				// Older bundles: Prism's "not enough free RAM" question popped up over Skyrim (Windows
+				// counts its file cache as used, and Skyrim is loading at that moment). Turn it off.
+				std::ifstream in(cfg, std::ios::binary);
+				std::string   text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				in.close();
+				if (text.find("LowMemWarning=") == std::string::npos) {
+					const auto at = text.find("[General]");
+					if (at != std::string::npos) {
+						const auto eol = text.find('\n', at);
+						text.insert(eol == std::string::npos ? text.size() : eol + 1, "LowMemWarning=false\n");
+					} else {
+						text += "\n[General]\nLowMemWarning=false\n";
+					}
+					std::ofstream(cfg, std::ios::binary | std::ios::trunc) << text;
+				}
 			}
 			std::ofstream(dir / "bundle.stamp") << stamp;
 			return prism;
@@ -203,6 +210,32 @@ namespace skycraft::Launcher
 	}
 
 	Status GetStatus() { return status.load(); }
+
+	// A Minecraft with the SkyCraft mod holds this mutex while it runs (SkyLink.announceRunning).
+	bool MinecraftRunning()
+	{
+		HANDLE mutex = ::OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\SkyCraft_v1_minecraft");
+		if (mutex) {
+			::CloseHandle(mutex);
+			return true;
+		}
+		return false;
+	}
+
+	bool PrismRunning()
+	{
+		HANDLE snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+		if (snapshot == INVALID_HANDLE_VALUE) {
+			return false;
+		}
+		PROCESSENTRY32W entry{ sizeof(entry) };
+		bool            found = false;
+		for (BOOL more = ::Process32FirstW(snapshot, &entry); more && !found; more = ::Process32NextW(snapshot, &entry)) {
+			found = _wcsicmp(entry.szExeFile, L"prismlauncher.exe") == 0;
+		}
+		::CloseHandle(snapshot);
+		return found;
+	}
 }
 
 namespace skycraft
@@ -234,6 +267,20 @@ namespace skycraft::Launcher
 		if (MinecraftRunning()) {
 			logger::info("Minecraft: already running");
 			status = Status::kRunning;
+			// It may be the last Skyrim's Minecraft on its way out (it quits a few seconds after that
+			// Skyrim closes, and this Skyrim only takes it over once its data has loaded): if it goes
+			// in the next minute, start one for this Skyrim.
+			std::thread([] {
+				for (int i = 0; i < 60; ++i) {
+					std::this_thread::sleep_for(1s);
+					if (!MinecraftRunning()) {
+						logger::info("Minecraft: the one that was running has quit; starting another");
+						std::this_thread::sleep_for(3s);  // let its launcher close too
+						StartMinecraft();
+						return;
+					}
+				}
+			}).detach();
 			return;
 		}
 		const std::filesystem::path chosen = ExpandEnv(Widen(ini.GetValue("Minecraft", "sLauncher", "")));

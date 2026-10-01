@@ -1,6 +1,7 @@
 #include "Game.h"
 
 #include "Collision.h"
+#include "Dig.h"
 
 namespace skycraft
 {
@@ -415,14 +416,14 @@ namespace skycraft
 		void ReportMinecraft(bool a_connected, bool a_inGame, float a_delta)
 		{
 			static float waited = 0.0f, nextNote = 3.0f;
-			static bool  told = false, gaveUp = false;
+			static bool  told = false, gaveUp = false, diagnosed = false;
 			if (a_connected) {
 				if (told) {
 					RE::SendHUDMessage::ShowHUDMessage("SkyCraft: Minecraft is ready.");
 				}
 				waited = 0.0f;
 				nextNote = 3.0f;
-				told = gaveUp = false;
+				told = gaveUp = diagnosed = false;
 				return;
 			}
 			if (!a_inGame || gaveUp) {
@@ -434,6 +435,20 @@ namespace skycraft
 			}
 			const auto status = Launcher::GetStatus();
 			const bool signIn = status == Launcher::Status::kSignIn;
+			// A minute on and still nothing: say which of the ways it can be stuck this is.
+			if (!diagnosed && waited > 60.0f && (status == Launcher::Status::kStarting || status == Launcher::Status::kRunning)) {
+				diagnosed = true;
+				const bool minecraft = Launcher::MinecraftRunning();
+				const bool prism = Launcher::PrismRunning();
+				logger::warn("Minecraft: not connected after a minute (Minecraft running: {}, Prism Launcher running: {})", minecraft, prism);
+				RE::SendHUDMessage::ShowHUDMessage(
+					minecraft ? "SkyCraft: Minecraft is running but not responding. Please report it with SkyCraft.log and Minecraft's latest.log." :
+					prism     ? "SkyCraft: Minecraft hasn't started yet. Alt-Tab to Prism Launcher: it may still be downloading, or need a sign-in, or show an error." :
+								"SkyCraft: Minecraft closed before connecting. Its log is AppData\\Local\\SkyCraft\\Prism\\instances\\SkyCraft\\.minecraft\\logs\\latest.log");
+				told = true;
+				nextNote = waited + 120.0f;
+				return;
+			}
 			if (waited > (signIn ? 600.0f : 180.0f)) {
 				RE::SendHUDMessage::ShowHUDMessage("SkyCraft: Minecraft still hasn't connected. See SkyCraft.log.");
 				gaveUp = true;
@@ -549,6 +564,7 @@ namespace skycraft
 				if (id != worldId) {
 					logger::info("world changed {:08X} -> {:08X}", worldId, id);
 					worldId = id;
+					Dig::SetWorld(id);
 					++epoch;
 					Collision::Get().Reset(epoch);
 					teleportPending = true;
@@ -791,6 +807,11 @@ namespace skycraft
 				}
 				lastSetPos = pos;
 				haveLastSet = true;
+				{
+					auto* proxyController = skyrim_cast<RE::bhkCharProxyController*>(a_player->GetCharController());
+					auto* proxy = proxyController ? proxyController->GetCharacterProxy() : nullptr;
+					Dig::SetPuppet(proxy && proxy->shapePhantom ? &proxy->shapePhantom->collidable : nullptr, pos.z * RE::bhkWorld::GetWorldScale());
+				}
 
 				// Minecraft's walk bob (GameRenderer.bobView), converted from a view-space pose on
 				// the scene into the equivalent camera offset: sway sideways, lift, and dip the view.
@@ -935,6 +956,7 @@ namespace skycraft
 				eyeValid = false;
 				idealValid = false;
 				st.feetValid = false;
+				Dig::SetPuppet(nullptr, 0.0f);
 				HideFirstPersonMeshes(a_player, false);
 
 				RestoreFov(RE::PlayerCamera::GetSingleton());
@@ -983,6 +1005,19 @@ namespace skycraft
 			// Minecraft's torches, lava and glowstone light Skyrim's world while Minecraft is there.
 			const McVec lightCentre = puppet ? McVec{ mc.x, mc.y, mc.z } : skyMc;
 			BlockLights::Update(haveMc && st.mcInWorld && !loading && cell ? &lightCentre : nullptr, a_delta);
+
+			// Blocks dug out of Skyrim's world: its collision around them goes to Minecraft again, and
+			// its meshes are cut.
+			static std::vector<Clip::Cube> dugChanged;
+			dugChanged.clear();
+			Dig::TakeChanged(dugChanged);
+			if (!dugChanged.empty()) {
+				Collision::Get().DigChanged(dugChanged);
+			}
+			// Not while the world is still settling after a load (its cells are still being attached).
+			static float digSettled = 0.0f;
+			digSettled = puppet && !loading && cell ? digSettled + a_delta : 0.0f;
+			Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 
 			ReportMinecraft(mcAlive, cell && !loading && !menu, a_delta);
 		}

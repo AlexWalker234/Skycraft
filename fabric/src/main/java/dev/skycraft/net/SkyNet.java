@@ -2,6 +2,9 @@ package dev.skycraft.net;
 
 import dev.skycraft.SkyCraft;
 import dev.skycraft.combat.SkyCombat;
+import dev.skycraft.world.SkyDig;
+import java.util.List;
+import net.minecraft.core.BlockPos;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.network.RegistryFriendlyByteBuf;
@@ -48,8 +51,51 @@ public final class SkyNet {
 		}
 	}
 
+	/** Client -> server: the player hit Skyrim's geometry in this cell (SkyDig.open). */
+	public record DigOpen(int world, BlockPos pos, int material) implements CustomPacketPayload {
+		public static final Type<DigOpen> TYPE = new Type<>(Identifier.fromNamespaceAndPath(SkyCraft.MOD_ID, "dig_open"));
+		public static final StreamCodec<RegistryFriendlyByteBuf, DigOpen> CODEC = StreamCodec.composite(
+			ByteBufCodecs.INT, DigOpen::world,
+			BlockPos.STREAM_CODEC, DigOpen::pos,
+			ByteBufCodecs.VAR_INT, DigOpen::material,
+			DigOpen::new
+		);
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
+	}
+
+	/** Client -> server: cells around a broken dug block that are inside Skyrim's geometry (SkyDig.reveal). */
+	public record DigReveal(int world, List<BlockPos> cells, List<Integer> materials) implements CustomPacketPayload {
+		public static final Type<DigReveal> TYPE = new Type<>(Identifier.fromNamespaceAndPath(SkyCraft.MOD_ID, "dig_reveal"));
+		public static final StreamCodec<RegistryFriendlyByteBuf, DigReveal> CODEC = StreamCodec.composite(
+			ByteBufCodecs.INT, DigReveal::world,
+			BlockPos.STREAM_CODEC.apply(ByteBufCodecs.list(64)), DigReveal::cells,
+			ByteBufCodecs.VAR_INT.apply(ByteBufCodecs.list(64)), DigReveal::materials,
+			DigReveal::new
+		);
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
+	}
+
 	public static void init() {
 		PayloadTypeRegistry.serverboundPlay().register(Hurt.TYPE, Hurt.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(DigOpen.TYPE, DigOpen.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(DigReveal.TYPE, DigReveal.CODEC);
+		ServerPlayNetworking.registerGlobalReceiver(DigOpen.TYPE, (payload, context) -> {
+			ServerPlayer player = context.player();
+			context.server().execute(() -> SkyDig.open(player, payload.world(), payload.pos(), payload.material()));
+		});
+		ServerPlayNetworking.registerGlobalReceiver(DigReveal.TYPE, (payload, context) -> {
+			ServerPlayer player = context.player();
+			int[] materials = payload.materials().stream().mapToInt(Integer::intValue).toArray();
+			context.server().execute(() -> SkyDig.reveal(player, payload.world(), payload.cells(), materials));
+		});
 		PayloadTypeRegistry.clientboundPlay().register(Died.TYPE, Died.CODEC);
 		ServerPlayNetworking.registerGlobalReceiver(Hurt.TYPE, (payload, context) -> {
 			ServerPlayer player = context.player();

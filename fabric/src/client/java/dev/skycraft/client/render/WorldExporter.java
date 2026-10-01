@@ -69,6 +69,7 @@ public final class WorldExporter {
 	private static final LongOpenHashSet LIT = new LongOpenHashSet(); // sections Skyrim holds lights for
 	private static final LongOpenHashSet SOLID = new LongOpenHashSet(); // sections Skyrim holds NPC collision for
 	private static final long[] SOLID_BITS = new long[64]; // 4096 blocks: bit x + 16z + 256y
+	private static final LongOpenHashSet DUG = new LongOpenHashSet(); // sections Skyrim holds dug cells for
 	private static final ByteBuffer LIGHTS = ByteBuffer.allocate(16 * 16 * 16 * 8).order(ByteOrder.LITTLE_ENDIAN);
 	private static int sentGeneration = Integer.MIN_VALUE;
 	private static int meshesSent;
@@ -135,6 +136,8 @@ public final class WorldExporter {
 		SENT.clear();
 		LIT.clear();
 		SOLID.clear();
+		DUG.clear();
+		dev.skycraft.client.SkyDigClient.resendAll();
 		// Everything already loaded needs meshing again; later chunk loads mark themselves dirty.
 		int radius = minecraft.options.getEffectiveRenderDistance() + 1;
 		int pcx = SectionPos.blockToSectionCoord(minecraft.player.getBlockX()), pcz = SectionPos.blockToSectionCoord(minecraft.player.getBlockZ());
@@ -187,7 +190,14 @@ public final class WorldExporter {
 		}
 		LevelChunkSection section = sectionAt(level, chunk, sy);
 		boolean empty = section == null || section.hasOnlyAir();
-		if (empty && !SENT.contains(key) && !LIT.contains(key) && !SOLID.contains(key)) {
+		long[] dug = dev.skycraft.client.SkyDigClient.dugBits(chunk, sy);
+		int dugCount = 0;
+		if (dug != null) {
+			for (long word : dug) {
+				dugCount += Long.bitCount(word);
+			}
+		}
+		if (empty && !SENT.contains(key) && !LIT.contains(key) && !SOLID.contains(key) && dugCount == 0 && !DUG.contains(key)) {
 			return false; // nothing there and nothing to remove
 		}
 		MESH.reset();
@@ -235,7 +245,14 @@ public final class WorldExporter {
 				}
 			}
 		}
-		if (MESH.vertexCount() == 0 && !SENT.contains(key) && lightCount == 0 && !LIT.contains(key) && solidCount == 0 && !SOLID.contains(key)) {
+		// Holes dug into Skyrim's ground: Minecraft walls where its surface still runs above them.
+		var digLookup = dev.skycraft.world.SkyDig.clientDug;
+		if (dugCount > 0 && digLookup != null) {
+			Minecraft minecraft = Minecraft.getInstance();
+			DigWalls.add(level, sx, sy, sz, dug, digLookup, st -> cubeFaces(minecraft, st), MESH::wall);
+		}
+		if (MESH.vertexCount() == 0 && !SENT.contains(key) && lightCount == 0 && !LIT.contains(key) && solidCount == 0 && !SOLID.contains(key) && dugCount == 0
+			&& !DUG.contains(key)) {
 			return true;
 		}
 		ByteBuffer header = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(MESH.vertexCount()).flip();
@@ -269,6 +286,24 @@ public final class WorldExporter {
 					SOLID.add(key);
 				} else {
 					SOLID.remove(key);
+				}
+			}
+			// Cells dug out of Skyrim's world: its geometry there goes.
+			if (dugCount > 0 || DUG.contains(key)) {
+				ByteBuffer dugHeader = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(dugCount)
+					.putInt(dev.skycraft.client.SkyDigClient.world()).putInt(0).flip();
+				ByteBuffer bits = ByteBuffer.allocate(dugCount > 0 ? 512 : 0).order(ByteOrder.LITTLE_ENDIAN);
+				if (dugCount > 0) {
+					for (long word : dug) {
+						bits.putLong(word);
+					}
+				}
+				if (!SkyLink.writeRender(Proto.REN_DUG, dugHeader, bits.flip())) {
+					markDirty(sx, sy, sz);
+				} else if (dugCount > 0) {
+					DUG.add(key);
+				} else {
+					DUG.remove(key);
 				}
 			}
 			if (++meshesSent <= 10 || meshesSent % 200 == 0) {
@@ -496,6 +531,15 @@ public final class WorldExporter {
 			int g = Math.min(255, Math.round(((argb >> 8) & 0xFF) / shade));
 			int b = Math.min(255, Math.round((argb & 0xFF) / shade));
 			return (argb & 0xFF000000) | (r << 16) | (g << 8) | b;
+		}
+
+		/** A dug hole's wall (DigWalls): an untinted opaque quad. */
+		void wall(float[] xyz, float[] uv, int light, Direction normal) {
+			this.ensure(6 * Proto.REN_VERTEX_BYTES);
+			int flags = flags(false, normal);
+			for (int k : new int[] { 0, 1, 2, 0, 2, 3 }) {
+				this.vertex(xyz[k * 3], xyz[k * 3 + 1], xyz[k * 3 + 2], uv[k * 2], uv[k * 2 + 1], 0xFFFFFFFF, light, flags);
+			}
 		}
 
 		// ---- block quads (BlockQuadOutput) ----

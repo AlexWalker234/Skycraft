@@ -1,5 +1,7 @@
 #include "Collision.h"
 
+#include "Dig.h"
+
 namespace skycraft
 {
 	namespace
@@ -275,6 +277,26 @@ namespace skycraft
 		int  done = 0;
 		bool gathered = false;
 		const auto start = now;
+		// Regions around blocks just dug: their collision changed.
+		while (!urgent_.empty() && done < kMaxHarvestsPerFrame * 2) {
+			const auto r = urgent_.back();
+			urgent_.pop_back();
+			if (std::abs(r[0] - prx) > kRadius + 1 || std::abs(r[2] - prz) > kRadius + 1 || r[1] - pry < -kBelow - 1 || r[1] - pry > kAbove + 1) {
+				harvested_.erase(RegionKey(r[0], r[1], r[2]));  // far away: sent again whenever it's needed
+				continue;
+			}
+			if (!gathered) {
+				RE::BSReadLockGuard lock(bhk->worldLock);
+				GatherBodies(world);
+				gathered = true;
+			}
+			{
+				RE::BSReadLockGuard lock(bhk->worldLock);
+				Harvest(r[0], r[1], r[2]);
+			}
+			harvested_[RegionKey(r[0], r[1], r[2])] = now;
+			++done;
+		}
 		for (const auto& o : offsets_) {
 			const int rx = prx + o[0], ry = pry + o[1], rz = prz + o[2];
 			const auto key = RegionKey(rx, ry, rz);
@@ -308,7 +330,7 @@ namespace skycraft
 	{
 		bodies_.clear();
 		const float k = BlocksPerHavok();
-		auto addIsland = [&](RE::hkpSimulationIsland* a_island) {
+		auto addIsland = [&](RE::hkpSimulationIsland* a_island, bool a_fixed) {
 			if (!a_island) {
 				return;
 			}
@@ -333,17 +355,24 @@ namespace skycraft
 				}
 				Body body{ shape, xf, {}, {}, IsStairHelper(collidable.GetCollisionLayer()) };
 				HkAabbToMc(box, k, body.lo, body.hi);
+				if (a_fixed && Dig::IsDiggableCollidable(&collidable)) {
+					body.diggable = true;
+					body.ref = RE::TESHavokUtilities::FindCollidableRef(collidable);
+					body.terrain = !body.ref;
+					auto* base = body.ref ? body.ref->GetBaseObject() : nullptr;
+					body.tree = collidable.GetCollisionLayer() == RE::COL_LAYER::kTrees || (base && base->GetFormType() == RE::FormType::Tree);
+				}
 				if (Finite(body.lo, 3) && Finite(body.hi, 3)) {
 					bodies_.push_back(body);
 				}
 			}
 		};
-		addIsland(a_world->fixedIsland);
+		addIsland(a_world->fixedIsland, true);
 		for (std::int32_t i = 0; i < a_world->activeSimulationIslands.size(); ++i) {
-			addIsland(a_world->activeSimulationIslands.data()[i]);
+			addIsland(a_world->activeSimulationIslands.data()[i], false);
 		}
 		for (std::int32_t i = 0; i < a_world->inactiveSimulationIslands.size(); ++i) {
-			addIsland(a_world->inactiveSimulationIslands.data()[i]);
+			addIsland(a_world->inactiveSimulationIslands.data()[i], false);
 		}
 	}
 
@@ -358,13 +387,18 @@ namespace skycraft
 		const float lo[3] = { float(a_rx * kRegionSize) - margin, float(a_ry * kRegionSize) - margin, float(a_rz * kRegionSize) - margin };
 		const float hi[3] = { float((a_rx + 1) * kRegionSize) + margin, float((a_ry + 1) * kRegionSize) + margin, float((a_rz + 1) * kRegionSize) + margin };
 		static constexpr CollectFn collect = [](void* a_self, const RE::hkpShape* a_shape, const float* a_xf, const float* a_lo, const float* a_hi, void* a_job) {
-			static_cast<Collision*>(a_self)->Collect(a_shape, a_xf, a_lo, a_hi, *static_cast<Job*>(a_job), 0);
+			static_cast<Collision*>(a_self)->Collect(a_shape, a_xf, a_lo, a_hi, *static_cast<Job*>(a_job), 0, RE::HK_INVALID_SHAPE_KEY);
 		};
 		Job helpers{};
 		for (const auto& body : bodies_) {
 			if (!Overlaps(body.lo, body.hi, lo, hi)) {
 				continue;
 			}
+			job.top = body.shape;
+			job.ref = body.ref;
+			job.diggable = body.diggable;
+			job.terrain = body.terrain;
+			job.tree = body.tree;
 			if (!GuardedCall(collect, this, body.shape, body.xf, lo, hi, body.helper ? &helpers : &job)) {
 				if (loggedTypes_.insert(-1).second) {
 					logger::warn("collision: faulted reading a Havok shape (type {}); skipping it", static_cast<int>(body.shape->type));
@@ -377,7 +411,18 @@ namespace skycraft
 		cv_.notify_one();
 	}
 
-	void Collision::Collect(const RE::hkpShape* a_shape, const float* a_xf, const float a_lo[3], const float a_hi[3], Job& a_job, int a_depth)
+	std::uint32_t Collision::FlagsFor(const Job& a_job, RE::hkpShapeKey a_key) const
+	{
+		if (!a_job.diggable) {
+			return 0;
+		}
+		const auto havok = Dig::ShapeMaterial(a_job.top, a_key);
+		const auto material = Dig::MaterialFor(havok, a_job.ref, a_job.tree);
+
+		return proto::kTriDiggable | (a_job.terrain ? proto::kTriTerrain : 0) | (std::uint32_t(material) << proto::kTriMaterialShift);
+	}
+
+	void Collision::Collect(const RE::hkpShape* a_shape, const float* a_xf, const float a_lo[3], const float a_hi[3], Job& a_job, int a_depth, RE::hkpShapeKey a_key)
 	{
 		if (!a_shape || a_depth > 8 || a_job.tris.size() > 400000) {
 			return;
@@ -415,7 +460,7 @@ namespace skycraft
 				}
 				for (std::uint32_t i = 0; i < found; ++i) {
 					RE::hkpShapeBuffer buffer;
-					Collect(container->GetChildShape(keys[i], buffer), a_xf, a_lo, a_hi, a_job, a_depth + 1);
+					Collect(container->GetChildShape(keys[i], buffer), a_xf, a_lo, a_hi, a_job, a_depth + 1, a_depth == 0 ? keys[i] : a_key);
 				}
 				return;
 			}
@@ -428,7 +473,7 @@ namespace skycraft
 			{
 				const auto* container = a_shape->GetContainer();
 				if (!container) {
-					EmitAabbFallback(a_shape, a_xf, a_job);
+					EmitAabbFallback(a_shape, a_xf, a_job, a_key);
 					return;
 				}
 				int guard = 0;
@@ -443,7 +488,7 @@ namespace skycraft
 					float lo[3], hi[3];
 					HkAabbToMc(box, k, lo, hi);
 					if (Overlaps(lo, hi, a_lo, a_hi)) {
-						Collect(child, a_xf, a_lo, a_hi, a_job, a_depth + 1);
+						Collect(child, a_xf, a_lo, a_hi, a_job, a_depth + 1, a_depth == 0 ? key : a_key);
 					}
 				}
 				return;
@@ -457,6 +502,27 @@ namespace skycraft
 					HkToMc(w, k, tri.v + v * 3);
 				}
 				if (Finite(tri.v, 9)) {
+					tri.flags = FlagsFor(a_job, a_key);
+					if (a_job.terrain) {
+						// The land's collision carries no material: take it from the texture painted there.
+						const auto centre = McToSky((tri.v[0] + tri.v[3] + tri.v[6]) / 3.0, 0.0, (tri.v[2] + tri.v[5] + tri.v[8]) / 3.0);
+						const auto id = Dig::LandMaterialAt(centre.x, centre.y);
+						static std::atomic<int> logged{ 0 };
+						if (logged.fetch_add(1) < 8) {
+							logger::info("collision: land material from its texture: {} -> {}", std::uint32_t(id), Dig::MaterialFor(id, nullptr, false));
+						}
+						if (id != RE::MATERIAL_ID::kNone) {
+							tri.flags = proto::kTriDiggable | proto::kTriTerrain | (std::uint32_t(Dig::MaterialFor(id, nullptr, false)) << proto::kTriMaterialShift);
+						}
+					}
+					if (a_job.terrain) {
+						// The land is a height field: its outside is up, whatever the winding says.
+						const float ux = tri.v[3] - tri.v[0], uz = tri.v[5] - tri.v[2];
+						const float wx = tri.v[6] - tri.v[0], wz = tri.v[8] - tri.v[2];
+						if (uz * wx - ux * wz < 0.0f) {
+							std::swap_ranges(tri.v + 3, tri.v + 6, tri.v + 6);
+						}
+					}
 					a_job.tris.push_back(tri);
 				}
 				return;
@@ -474,6 +540,7 @@ namespace skycraft
 					obb.half[i] = (half[i] + radius) * k;
 				}
 				if (Finite(obb.c, 3) && Finite(obb.half, 3)) {
+					obb.flags = FlagsFor(a_job, a_key);
 					a_job.boxes.push_back(obb);
 				}
 				return;
@@ -491,6 +558,7 @@ namespace skycraft
 				HkToMc(w, k, cap.b);
 				cap.r = radius * k;
 				if (Finite(cap.a, 3) && Finite(cap.b, 3) && std::isfinite(cap.r) && cap.r < 1000.0f) {
+					cap.flags = FlagsFor(a_job, a_key);
 					a_job.capsules.push_back(cap);
 				}
 				return;
@@ -500,7 +568,7 @@ namespace skycraft
 				const auto& planes = *reinterpret_cast<const RE::hkArray<RE::hkVector4>*>(reinterpret_cast<const std::uint8_t*>(a_shape) + 0x78);
 				const float radius = Field<float>(a_shape, 0x20);
 				if (planes.size() <= 0 || planes.size() > 512) {
-					EmitAabbFallback(a_shape, a_xf, a_job);
+					EmitAabbFallback(a_shape, a_xf, a_job, a_key);
 					return;
 				}
 				Convex cvx{};
@@ -518,6 +586,7 @@ namespace skycraft
 					cvx.planes.push_back({ nm[0], nm[1], nm[2], dw * k });
 				}
 				if (Finite(cvx.lo, 3) && Finite(cvx.hi, 3)) {
+					cvx.flags = FlagsFor(a_job, a_key);
 					a_job.convexes.push_back(std::move(cvx));
 				}
 				return;
@@ -533,12 +602,12 @@ namespace skycraft
 					std::memcpy(local + 12, Vec(a_shape, 0x40), sizeof(float) * 3);
 				}
 				if (!child || !XfLooksValid(local)) {
-					EmitAabbFallback(a_shape, a_xf, a_job);
+					EmitAabbFallback(a_shape, a_xf, a_job, a_key);
 					return;
 				}
 				alignas(16) float composed[16];
 				XfCompose(a_xf, local, composed);
-				Collect(child, composed, a_lo, a_hi, a_job, a_depth + 1);
+				Collect(child, composed, a_lo, a_hi, a_job, a_depth + 1, a_key);
 				return;
 			}
 		case T::kTransform:
@@ -547,12 +616,12 @@ namespace skycraft
 				alignas(16) float local[16];
 				std::memcpy(local, Vec(a_shape, 0x50), sizeof(local));
 				if (!child || !XfLooksValid(local)) {
-					EmitAabbFallback(a_shape, a_xf, a_job);
+					EmitAabbFallback(a_shape, a_xf, a_job, a_key);
 					return;
 				}
 				alignas(16) float composed[16];
 				XfCompose(a_xf, local, composed);
-				Collect(child, composed, a_lo, a_hi, a_job, a_depth + 1);
+				Collect(child, composed, a_lo, a_hi, a_job, a_depth + 1, a_key);
 				return;
 			}
 		default:
@@ -560,13 +629,13 @@ namespace skycraft
 				logger::info("collision: shape type {} handled as AABB (convex={})", static_cast<int>(type), a_shape->IsConvex());
 			}
 			if (a_shape->IsConvex()) {
-				EmitAabbFallback(a_shape, a_xf, a_job);
+				EmitAabbFallback(a_shape, a_xf, a_job, a_key);
 			}
 			return;
 		}
 	}
 
-	void Collision::EmitAabbFallback(const RE::hkpShape* a_shape, const float* a_xf, Job& a_job)
+	void Collision::EmitAabbFallback(const RE::hkpShape* a_shape, const float* a_xf, Job& a_job, RE::hkpShapeKey a_key)
 	{
 		RE::hkAabb box;
 		a_shape->GetAabbImpl(*reinterpret_cast<const RE::hkTransform*>(a_xf), 0.0f, box);
@@ -582,6 +651,7 @@ namespace skycraft
 			obb.axis[i][0] = obb.axis[i][1] = obb.axis[i][2] = 0.0f;
 			obb.axis[i][i] = 1.0f;
 		}
+		obb.flags = FlagsFor(a_job, a_key);
 		a_job.boxes.push_back(obb);
 	}
 
@@ -630,12 +700,35 @@ namespace skycraft
 	}
 
 	// Boxes, capsules (as boxes) and convex hulls -> triangles, plus the job's own triangles.
+	// Primitives are solid, so their triangles are wound to face outward.
 	void Collision::Triangulate(const Job& a_src, std::vector<Tri>& a_out)
 	{
 		a_out.insert(a_out.end(), a_src.tris.begin(), a_src.tris.end());
+		std::uint32_t flags = 0;
+		const float*  centre = nullptr;   // outward = away from here
+		const float*  outward = nullptr;  // or along this
+		auto emit = [&](const float* a, const float* b, const float* c) {
+			Tri t{ { a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2] }, flags };
+			float e1[3], e2[3], n[3];
+			Sub(b, a, e1);
+			Sub(c, a, e2);
+			Cross(e1, e2, n);
+			float dir[3] = { 0, 0, 0 };
+			if (outward) {
+				std::memcpy(dir, outward, sizeof(dir));
+			} else if (centre) {
+				for (int i = 0; i < 3; ++i) {
+					dir[i] = (a[i] + b[i] + c[i]) / 3.0f - centre[i];
+				}
+			}
+			if (Dot(n, dir) < 0.0f) {
+				std::swap_ranges(t.v + 3, t.v + 6, t.v + 6);
+			}
+			a_out.push_back(t);
+		};
 		auto quad = [&](const float* a, const float* b, const float* c, const float* d) {
-			a_out.push_back({ { a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2] } });
-			a_out.push_back({ { a[0], a[1], a[2], c[0], c[1], c[2], d[0], d[1], d[2] } });
+			emit(a, b, c);
+			emit(a, c, d);
 		};
 		auto box = [&](const float* c, const float (*axis)[3], const float* half) {
 			float corner[8][3];
@@ -653,6 +746,8 @@ namespace skycraft
 			quad(corner[1], corner[3], corner[7], corner[5]);
 		};
 		for (const auto& b : a_src.boxes) {
+			flags = b.flags;
+			centre = b.c;
 			box(b.c, b.axis, b.half);
 		}
 		for (const auto& cap : a_src.capsules) {
@@ -676,10 +771,14 @@ namespace skycraft
 			Cross(axis[2], axis[0], axis[1]);
 			const float c[3] = { (cap.a[0] + cap.b[0]) * 0.5f, (cap.a[1] + cap.b[1]) * 0.5f, (cap.a[2] + cap.b[2]) * 0.5f };
 			const float half[3] = { cap.r, cap.r, len * 0.5f + cap.r };
+			flags = cap.flags;
+			centre = c;
 			box(c, axis, half);
 		}
 		// Convex hull from planes: clip a big square on each plane by all the other planes.
+		centre = nullptr;
 		for (const auto& cvx : a_src.convexes) {
+			flags = cvx.flags;
 			const float ex = cvx.hi[0] - cvx.lo[0], ey = cvx.hi[1] - cvx.lo[1], ez = cvx.hi[2] - cvx.lo[2];
 			const float diag = std::sqrt(ex * ex + ey * ey + ez * ez) + 1.0f;
 			const float mid[3] = { (cvx.lo[0] + cvx.hi[0]) * 0.5f, (cvx.lo[1] + cvx.hi[1]) * 0.5f, (cvx.lo[2] + cvx.hi[2]) * 0.5f };
@@ -731,9 +830,11 @@ namespace skycraft
 					}
 					poly.swap(out);
 				}
+				outward = n;
 				for (std::size_t v = 1; v + 1 < poly.size(); ++v) {
-					a_out.push_back({ { poly[0][0], poly[0][1], poly[0][2], poly[v][0], poly[v][1], poly[v][2], poly[v + 1][0], poly[v + 1][1], poly[v + 1][2] } });
+					emit(poly[0].data(), poly[v].data(), poly[v + 1].data());
 				}
+				outward = nullptr;
 			}
 		}
 	}
@@ -759,8 +860,59 @@ namespace skycraft
 				out.push_back(t);
 			}
 		};
+		// The dug blocks around this region's diggable triangles, merged into boxes once.
+		std::vector<Clip::Box> boxes;
+		if (Dig::Any()) {
+			float dlo[3] = { FLT_MAX, FLT_MAX, FLT_MAX }, dhi[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+			for (const auto& t : solid) {
+				if (t.flags & proto::kTriDiggable) {
+					for (int k = 0; k < 3; ++k) {
+						dlo[k] = std::min({ dlo[k], t.v[k], t.v[3 + k], t.v[6 + k] });
+						dhi[k] = std::max({ dhi[k], t.v[k], t.v[3 + k], t.v[6 + k] });
+					}
+				}
+			}
+			if (dlo[0] <= dhi[0]) {
+				std::vector<Clip::Cube> cubes;
+				Dig::Collect(dlo, dhi, cubes);
+				boxes = Clip::Merge(cubes);
+			}
+		}
+		std::vector<Clip::Box>  nearBoxes;
+		std::vector<Clip::Poly> pieces;
 		for (const auto& t : solid) {
-			add(t, 0);
+			if ((t.flags & proto::kTriDiggable) && !boxes.empty()) {
+				float tlo[3], thi[3];
+				for (int k = 0; k < 3; ++k) {
+					tlo[k] = std::min({ t.v[k], t.v[3 + k], t.v[6 + k] });
+					thi[k] = std::max({ t.v[k], t.v[3 + k], t.v[6 + k] });
+				}
+				nearBoxes.clear();
+				for (const auto& b : boxes) {
+					if (thi[0] >= b.lo[0] && tlo[0] <= b.hi[0] && thi[1] >= b.lo[1] && tlo[1] <= b.hi[1] && thi[2] >= b.lo[2] && tlo[2] <= b.hi[2]) {
+						nearBoxes.push_back(b);
+					}
+				}
+				if (!nearBoxes.empty()) {
+					static std::atomic<int> logged{ 0 };
+					if (logged.fetch_add(1) < 3) {
+						logger::info("collision: cut dug blocks out of a triangle (material {})", (t.flags >> proto::kTriMaterialShift) & 0xFF);
+					}
+					add(t, t.flags | proto::kTriGhost);  // the surface as it was: what's behind it is solid
+					pieces.clear();
+					Clip::Subtract(Clip::FromTriangle(t.v, t.v + 3, t.v + 6), nearBoxes, pieces);
+					for (const auto& piece : pieces) {
+						for (std::size_t v = 1; v + 1 < piece.size(); ++v) {
+							Tri part{ { piece[0].p[0], piece[0].p[1], piece[0].p[2], piece[v].p[0], piece[v].p[1], piece[v].p[2], piece[v + 1].p[0], piece[v + 1].p[1],
+										  piece[v + 1].p[2] },
+								t.flags };
+							add(part, part.flags);
+						}
+					}
+					continue;
+				}
+			}
+			add(t, t.flags);
 		}
 		for (const auto& t : a_job.helperTris) {
 			add(t, proto::kTriStairHelper);
@@ -786,6 +938,7 @@ namespace skycraft
 	{
 		constexpr int G = kGrid;
 		std::vector<std::uint64_t> solid(G * G, 0), steep(G * G, 0);
+		std::vector<std::uint64_t> digSolid(G * G, 0), digSteep(G * G, 0);  // diggable geometry
 		auto set = [&](std::vector<std::uint64_t>& a_grid, int x, int y, int z) { a_grid[y * G + z] |= 1ull << x; };
 
 		const float ox = float(a_job.rx * kRegionSize), oy = float(a_job.ry * kRegionSize), oz = float(a_job.rz * kRegionSize);
@@ -821,7 +974,8 @@ namespace skycraft
 			}
 			n[0] /= len, n[1] /= len, n[2] /= len;
 			const float ny = std::fabs(n[1]);
-			auto&       grid = (ny >= kSteepMax || ny < kSteepMin) ? solid : steep;
+			const bool  flat = ny >= kSteepMax || ny < kSteepMin;
+			auto&       grid = (tri.flags & proto::kTriDiggable) ? (flat ? digSolid : digSteep) : (flat ? solid : steep);
 
 			int dom = 0;
 			if (std::fabs(n[1]) > std::fabs(n[dom])) dom = 1;
@@ -854,7 +1008,8 @@ namespace skycraft
 		}
 
 		// Convex primitives: voxel-center containment with a small margin.
-		auto fillPrimitive = [&](const float* a_lo, const float* a_hi, auto&& a_inside) {
+		auto fillPrimitive = [&](const float* a_lo, const float* a_hi, std::uint32_t a_flags, auto&& a_inside) {
+			auto& grid = (a_flags & proto::kTriDiggable) ? digSolid : solid;
 			float lo[3], hi[3];
 			toVoxel(a_lo, lo);
 			toVoxel(a_hi, hi);
@@ -866,7 +1021,7 @@ namespace skycraft
 					for (int x = clampLo(lo[0] - 1); x <= clampHi(hi[0] + 1); ++x) {
 						const float p[3] = { ox + (x + 0.5f) / 8.0f, oy + (y + 0.5f) / 8.0f, oz + (z + 0.5f) / 8.0f };
 						if (a_inside(p)) {
-							set(solid, x, y, z);
+							set(grid, x, y, z);
 						}
 					}
 				}
@@ -880,7 +1035,7 @@ namespace skycraft
 				lo[i] = box.c[i] - ext;
 				hi[i] = box.c[i] + ext;
 			}
-			fillPrimitive(lo, hi, [&](const float* p) {
+			fillPrimitive(lo, hi, box.flags, [&](const float* p) {
 				const float d[3] = { p[0] - box.c[0], p[1] - box.c[1], p[2] - box.c[2] };
 				for (int i = 0; i < 3; ++i) {
 					if (std::fabs(Dot(d, box.axis[i])) > box.half[i] + m) {
@@ -896,7 +1051,7 @@ namespace skycraft
 				lo[i] = std::min(cap.a[i], cap.b[i]) - cap.r;
 				hi[i] = std::max(cap.a[i], cap.b[i]) + cap.r;
 			}
-			fillPrimitive(lo, hi, [&](const float* p) {
+			fillPrimitive(lo, hi, cap.flags, [&](const float* p) {
 				float ab[3], ap[3];
 				Sub(cap.b, cap.a, ab);
 				Sub(p, cap.a, ap);
@@ -907,7 +1062,7 @@ namespace skycraft
 			});
 		}
 		for (const auto& cvx : a_job.convexes) {
-			fillPrimitive(cvx.lo, cvx.hi, [&](const float* p) {
+			fillPrimitive(cvx.lo, cvx.hi, cvx.flags, [&](const float* p) {
 				for (const auto& pl : cvx.planes) {
 					if (pl[0] * p[0] + pl[1] * p[1] + pl[2] * p[2] + pl[3] > m) {
 						return false;
@@ -920,29 +1075,56 @@ namespace skycraft
 		// Steep (50-84 degree) surfaces: snap to whole-block footprints so the risers between
 		// neighbouring columns exceed MC's 0.6 step height. Minecraft's own step-up/jump rules
 		// then decide what is climbable, like a cliff made of blocks.
-		for (int by = 0; by < kRegionSize; ++by) {
-			for (int bz = 0; bz < kRegionSize; ++bz) {
-				for (int bx = 0; bx < kRegionSize; ++bx) {
-					const std::uint64_t xmask = 0xFFull << (bx * 8);
-					int                 minY = 99, maxY = -1;
-					for (int y = by * 8; y < by * 8 + 8; ++y) {
-						for (int z = bz * 8; z < bz * 8 + 8; ++z) {
-							if (steep[y * G + z] & xmask) {
-								minY = std::min(minY, y);
-								maxY = std::max(maxY, y);
+		auto coarsen = [&](const std::vector<std::uint64_t>& a_steep, std::vector<std::uint64_t>& a_solid) {
+			for (int by = 0; by < kRegionSize; ++by) {
+				for (int bz = 0; bz < kRegionSize; ++bz) {
+					for (int bx = 0; bx < kRegionSize; ++bx) {
+						const std::uint64_t xmask = 0xFFull << (bx * 8);
+						int                 minY = 99, maxY = -1;
+						for (int y = by * 8; y < by * 8 + 8; ++y) {
+							for (int z = bz * 8; z < bz * 8 + 8; ++z) {
+								if (a_steep[y * G + z] & xmask) {
+									minY = std::min(minY, y);
+									maxY = std::max(maxY, y);
+								}
 							}
 						}
-					}
-					if (maxY < 0) {
-						continue;
-					}
-					for (int y = minY; y <= maxY; ++y) {
-						for (int z = bz * 8; z < bz * 8 + 8; ++z) {
-							solid[y * G + z] |= xmask;
+						if (maxY < 0) {
+							continue;
+						}
+						for (int y = minY; y <= maxY; ++y) {
+							for (int z = bz * 8; z < bz * 8 + 8; ++z) {
+								a_solid[y * G + z] |= xmask;
+							}
 						}
 					}
 				}
 			}
+		};
+		coarsen(steep, solid);
+		coarsen(digSteep, digSolid);
+
+		// Dug blocks: the diggable geometry in them is gone.
+		if (Dig::Any()) {
+			const float rlo[3] = { ox + 0.5f, oy + 0.5f, oz + 0.5f };
+			const float rhi[3] = { ox + kRegionSize - 0.5f, oy + kRegionSize - 0.5f, oz + kRegionSize - 0.5f };
+			std::vector<Clip::Cube> dug;
+			Dig::Collect(rlo, rhi, dug);
+			for (const auto& cube : dug) {
+				const int bx = cube[0] - int(ox), by = cube[1] - int(oy), bz = cube[2] - int(oz);
+				if (bx < 0 || by < 0 || bz < 0 || bx >= kRegionSize || by >= kRegionSize || bz >= kRegionSize) {
+					continue;
+				}
+				const std::uint64_t keep = ~(0xFFull << (bx * 8));
+				for (int y = by * 8; y < by * 8 + 8; ++y) {
+					for (int z = bz * 8; z < bz * 8 + 8; ++z) {
+						digSolid[y * G + z] &= keep;
+					}
+				}
+			}
+		}
+		for (std::size_t i = 0; i < solid.size(); ++i) {
+			solid[i] |= digSolid[i];
 		}
 
 		// Pack non-empty blocks, and keep the box around each one's voxels (contact shadows).
@@ -1039,6 +1221,27 @@ namespace skycraft
 			std::memcpy(payload.data() + sizeof(header), blocks.data(), blocks.size() * sizeof(proto::ColBlock));
 		}
 		Send(payload, proto::kColRegion);
+	}
+
+	void Collision::DigChanged(const std::vector<std::array<int, 3>>& a_blocks)
+	{
+		auto floorDiv = [](int v) { return v >= 0 ? v / kRegionSize : -((-v + kRegionSize - 1) / kRegionSize); };
+		std::unordered_set<std::uint64_t> queued;
+		for (const auto& r : urgent_) {
+			queued.insert(RegionKey(r[0], r[1], r[2]));
+		}
+		for (const auto& b : a_blocks) {
+			// Triangles are sent with every region they come within half a block of.
+			for (int rx = floorDiv(b[0] - 1); rx <= floorDiv(b[0] + 1); ++rx) {
+				for (int ry = floorDiv(b[1] - 1); ry <= floorDiv(b[1] + 1); ++ry) {
+					for (int rz = floorDiv(b[2] - 1); rz <= floorDiv(b[2] + 1); ++rz) {
+						if (queued.insert(RegionKey(rx, ry, rz)).second) {
+							urgent_.push_back({ rx, ry, rz });
+						}
+					}
+				}
+			}
+		}
 	}
 
 	void Collision::CopyBoxes(const std::int32_t a_origin[3], const std::int32_t a_size[3], std::uint32_t* a_out) const

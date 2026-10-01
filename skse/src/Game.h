@@ -65,6 +65,12 @@ namespace skycraft
 	// used while developing (several lines a second). Off by default.
 	bool DiagnosticsEnabled();
 
+	namespace CrashLog
+	{
+		// Logs where Skyrim crashed (and writes a minidump) if it does.
+		void Install();
+	}
+
 	namespace Launcher
 	{
 		// At plugin load: starts Minecraft (per SkyCraft.ini) unless it's already running.
@@ -80,6 +86,11 @@ namespace skycraft
 			kFailed,      // starting it failed
 		};
 		Status GetStatus();
+
+		// A Minecraft with the SkyCraft mod is running (it holds SkyCraft's mutex from early on).
+		bool MinecraftRunning();
+		// Prism Launcher is running (downloading, waiting on a sign-in or showing an error).
+		bool PrismRunning();
 	}
 
 	namespace Input

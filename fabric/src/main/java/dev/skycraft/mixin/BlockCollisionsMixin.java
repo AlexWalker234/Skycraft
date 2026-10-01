@@ -31,6 +31,13 @@ public abstract class BlockCollisionsMixin {
 		CollisionContext context, BlockState state, CollisionGetter level, BlockPos pos, Operation<VoxelShape> original
 	) {
 		VoxelShape blockShape = original.call(context, state, level, pos);
+		// The walls of holes dug into Skyrim's ground: solid for everyone.
+		if (state.isAir()) {
+			VoxelShape wall = dev.skycraft.world.SkyDig.wallShape(level, pos);
+			if (wall != null) {
+				blockShape = blockShape.isEmpty() ? wall : Shapes.or(blockShape, wall);
+			}
+		}
 		if (context instanceof EntityCollisionContext entityContext && SkyCollision.usesSmoothCollider(entityContext.getEntity())) {
 			return blockShape; // this entity collides with Skyrim's exact triangles instead (SkyCollider)
 		}

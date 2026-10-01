@@ -10,8 +10,23 @@ public final class SkyTri {
 	public final double minX, minY, minZ, maxX, maxY, maxZ;
 	public final boolean stairHelper;
 	public final boolean walkable;
+	/** Ground, rock, trees...: can be dug into. Its normal then faces out of the solid side. */
+	public final boolean diggable;
+	/** What it digs into (Proto.DIG_*). */
+	public final int material;
+	/** Skyrim's land (terrain), not an object on it. */
+	public final boolean terrain;
 
 	public SkyTri(float[] v, int o, boolean stairHelper) {
+		this(v, o, stairHelper ? dev.skycraft.link.Proto.TRI_STAIR_HELPER : 0);
+	}
+
+	/** {@code flags}: the triangle's Proto.TRI_* flags as Skyrim sent them. */
+	public SkyTri(float[] v, int o, int flags) {
+		boolean stairHelper = (flags & dev.skycraft.link.Proto.TRI_STAIR_HELPER) != 0;
+		this.diggable = (flags & dev.skycraft.link.Proto.TRI_DIGGABLE) != 0;
+		this.material = (flags >>> dev.skycraft.link.Proto.TRI_MATERIAL_SHIFT) & 0xFF;
+		this.terrain = (flags & dev.skycraft.link.Proto.TRI_TERRAIN) != 0;
 		this.ax = v[o];
 		this.ay = v[o + 1];
 		this.az = v[o + 2];

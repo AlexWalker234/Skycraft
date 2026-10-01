@@ -28,6 +28,18 @@ public final class SkyClip {
 
 	public static BlockHitResult refine(Vec3 from, Vec3 to, BlockHitResult vanilla, Use use) {
 		SkyRay.Hit hit = cast(from, to);
+		if (use == Use.PICK) {
+			// The walls of a dug hole (Skyrim ground the crosshair meets from inside the hole).
+			double limit = hit != null ? hit.t() : 1.0;
+			if (vanilla.getType() != HitResult.Type.MISS) {
+				limit = Math.min(limit, Math.sqrt(from.distanceToSqr(vanilla.getLocation()) / Math.max(from.distanceToSqr(to), 1e-9)));
+			}
+			SkyRay.Hit wall = digWall(from, to, limit);
+			if (wall != null) {
+				hit = wall;
+				vanilla = BlockHitResult.miss(to, Direction.UP, BlockPos.containing(to));
+			}
+		}
 		if (hit == null) {
 			return vanilla;
 		}
@@ -37,7 +49,68 @@ public final class SkyClip {
 		}
 		Direction face = Direction.values()[SkyRay.dominantFace(hit.nx(), hit.ny(), hit.nz())];
 		int[] cell = use == Use.PICK ? SkyRay.placementCell(hit) : SkyRay.surfaceCell(hit);
-		return new SkyrimHitResult(location, face, new BlockPos(cell[0], cell[1], cell[2]), hit.nx(), hit.ny(), hit.nz());
+		return new SkyrimHitResult(location, face, new BlockPos(cell[0], cell[1], cell[2]), hit);
+	}
+
+	private static final SkyTri STONE_WALL = new SkyTri(new float[9], 0, dev.skycraft.link.Proto.TRI_DIGGABLE | (dev.skycraft.link.Proto.DIG_STONE << dev.skycraft.link.Proto.TRI_MATERIAL_SHIFT));
+
+	/**
+	 * Where the segment, having gone through dug cells, first enters an undug cell inside Skyrim's
+	 * geometry (the wall of a hole, drawn by the client's DigWalls), before segment parameter
+	 * {@code limit}; or null.
+	 */
+	static SkyRay.Hit digWall(Vec3 from, Vec3 to, double limit) {
+		SkyDig.DugLookup dug = SkyDig.clientDug;
+		if (dug == null) {
+			return null;
+		}
+		double dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
+		int x = (int) Math.floor(from.x), y = (int) Math.floor(from.y), z = (int) Math.floor(from.z);
+		int stepX = dx > 0 ? 1 : -1, stepY = dy > 0 ? 1 : -1, stepZ = dz > 0 ? 1 : -1;
+		double tDeltaX = dx == 0 ? Double.POSITIVE_INFINITY : Math.abs(1.0 / dx);
+		double tDeltaY = dy == 0 ? Double.POSITIVE_INFINITY : Math.abs(1.0 / dy);
+		double tDeltaZ = dz == 0 ? Double.POSITIVE_INFINITY : Math.abs(1.0 / dz);
+		double tMaxX = dx == 0 ? Double.POSITIVE_INFINITY : ((dx > 0 ? x + 1 - from.x : from.x - x) * tDeltaX);
+		double tMaxY = dy == 0 ? Double.POSITIVE_INFINITY : ((dy > 0 ? y + 1 - from.y : from.y - y) * tDeltaY);
+		double tMaxZ = dz == 0 ? Double.POSITIVE_INFINITY : ((dz > 0 ? z + 1 - from.z : from.z - z) * tDeltaZ);
+		boolean wasDug = dug.isDug(x, y, z);
+		SkyDig.Probe probe = null;
+		for (int i = 0; i < 64; i++) {
+			double t;
+			double nx = 0, ny = 0, nz = 0;
+			if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
+				t = tMaxX;
+				tMaxX += tDeltaX;
+				x += stepX;
+				nx = -stepX;
+			} else if (tMaxY <= tMaxZ) {
+				t = tMaxY;
+				tMaxY += tDeltaY;
+				y += stepY;
+				ny = -stepY;
+			} else {
+				t = tMaxZ;
+				tMaxZ += tDeltaZ;
+				z += stepZ;
+				nz = -stepZ;
+			}
+			if (t > limit) {
+				return null;
+			}
+			boolean isDug = dug.isDug(x, y, z);
+			if (wasDug && !isDug) {
+				double px = from.x + dx * t, py = from.y + dy * t, pz = from.z + dz * t;
+				if (probe == null) {
+					probe = new SkyDig.Probe().around(Math.min(from.x, to.x), Math.min(from.y, to.y), Math.min(from.z, to.z), Math.max(from.x, to.x), Math.max(from.y, to.y),
+						Math.max(from.z, to.z));
+				}
+				if (probe.test(px - nx * 0.02, py - ny * 0.02, pz - nz * 0.02) > SkyDig.AIR) {
+					return new SkyRay.Hit(t, px, py, pz, nx, ny, nz, probe.surface != null ? probe.surface : STONE_WALL);
+				}
+			}
+			wasDug = isDug;
+		}
+		return null;
 	}
 
 	/** Nearest Skyrim triangle hit on the segment, or null. */
@@ -53,15 +126,17 @@ public final class SkyClip {
 		return hit;
 	}
 
-	/** A hit on Skyrim geometry (not a Minecraft block). Keeps the exact surface normal. */
+	/** A hit on Skyrim geometry (not a Minecraft block). Keeps the exact surface normal and triangle. */
 	public static final class SkyrimHitResult extends BlockHitResult {
 		public final double nx, ny, nz;
+		public final SkyRay.Hit hit;
 
-		public SkyrimHitResult(Vec3 location, Direction direction, BlockPos pos, double nx, double ny, double nz) {
+		public SkyrimHitResult(Vec3 location, Direction direction, BlockPos pos, SkyRay.Hit hit) {
 			super(location, direction, pos, false);
-			this.nx = nx;
-			this.ny = ny;
-			this.nz = nz;
+			this.nx = hit.nx();
+			this.ny = hit.ny();
+			this.nz = hit.nz();
+			this.hit = hit;
 		}
 	}
 }

@@ -7,8 +7,8 @@ public final class SkyRay {
 	private SkyRay() {
 	}
 
-	/** Nearest hit along a segment: {@code t} in [0, 1] and the surface normal facing the ray origin. */
-	public record Hit(double t, double x, double y, double z, double nx, double ny, double nz) {
+	/** Nearest hit along a segment: {@code t} in [0, 1], the surface normal facing the ray origin, and the triangle. */
+	public record Hit(double t, double x, double y, double z, double nx, double ny, double nz, SkyTri tri) {
 	}
 
 	/**
@@ -38,7 +38,7 @@ public final class SkyRay {
 			ny = -ny;
 			nz = -nz;
 		}
-		return new Hit(best, fx + dx * best, fy + dy * best, fz + dz * best, nx, ny, nz);
+		return new Hit(best, fx + dx * best, fy + dy * best, fz + dz * best, nx, ny, nz, hitTri);
 	}
 
 	/** Moller-Trumbore, two-sided. Returns the segment parameter or -1. */

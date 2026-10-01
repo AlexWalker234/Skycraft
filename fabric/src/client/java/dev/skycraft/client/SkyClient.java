@@ -150,10 +150,21 @@ public final class SkyClient {
 	private static final boolean QUIT_WITH_SKYRIM = Boolean.parseBoolean(System.getProperty("skycraft.quitWithSkyrim", "true"));
 	private static long skyrimGoneSince;
 	private static long nextSkyrimCheck;
+	// Started hidden by Skyrim but never connected: nobody can see or use this Minecraft, and it
+	// would stop the next Skyrim from starting a fresh one ("already running"). It goes after this.
+	private static final long NEVER_CONNECTED_QUIT_MS = 10 * 60 * 1000;
+	private static final long STARTED_AT = System.currentTimeMillis();
+	private static boolean gaveUpWaiting;
 
 	private static void quitWithSkyrim(Minecraft minecraft) {
 		int pid = SkyLink.skyrimPid();
 		long now = System.currentTimeMillis();
+		if (QUIT_WITH_SKYRIM && START_HIDDEN && pid == 0 && !tookOver && !gaveUpWaiting && now - STARTED_AT > NEVER_CONNECTED_QUIT_MS) {
+			gaveUpWaiting = true;
+			SkyCraft.LOG.warn("SkyCraft: started hidden but Skyrim never connected in {} minutes; quitting", NEVER_CONNECTED_QUIT_MS / 60000);
+			minecraft.stop();
+			return;
+		}
 		if (!QUIT_WITH_SKYRIM || pid == 0 || now < nextSkyrimCheck) {
 			return;
 		}
@@ -174,6 +185,7 @@ public final class SkyClient {
 	public static void clientTick(Minecraft minecraft) {
 		MirrorWorld.tick(minecraft);
 		DiscordPresence.tick(minecraft);
+		SkyDigClient.tick(minecraft);
 		freezeWhileUnlinked(minecraft);
 		holdUntilReady(minecraft);
 		publishTick(minecraft);

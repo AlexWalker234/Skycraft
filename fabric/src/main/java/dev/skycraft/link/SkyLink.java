@@ -26,6 +26,11 @@ public final class SkyLink {
 	private static final VarHandle LONG = JAVA_LONG.varHandle();
 
 	private static final MethodHandle OPEN_FILE_MAPPING;
+	// OpenFileMappingW's GetLastError, captured right after the call (the JVM may change it later).
+	private static final java.lang.foreign.StructLayout CALL_STATE = Linker.Option.captureStateLayout();
+	private static final VarHandle LAST_ERROR = CALL_STATE.varHandle(java.lang.foreign.MemoryLayout.PathElement.groupElement("GetLastError"));
+	private static final MemorySegment OPEN_STATE = Arena.global().allocate(CALL_STATE);
+	private static int lastOpenError = -1;
 	private static final MethodHandle MAP_VIEW_OF_FILE;
 	private static final MethodHandle GET_TICK_COUNT64;
 	private static final MethodHandle GET_CURRENT_PROCESS_ID;
@@ -39,7 +44,7 @@ public final class SkyLink {
 		Linker linker = Linker.nativeLinker();
 		SymbolLookup k32 = SymbolLookup.libraryLookup("kernel32", Arena.global());
 		OPEN_FILE_MAPPING = linker.downcallHandle(
-			k32.find("OpenFileMappingW").orElseThrow(), FunctionDescriptor.of(ADDRESS, JAVA_INT, JAVA_INT, ADDRESS)
+			k32.find("OpenFileMappingW").orElseThrow(), FunctionDescriptor.of(ADDRESS, JAVA_INT, JAVA_INT, ADDRESS), Linker.Option.captureCallState("GetLastError")
 		);
 		MAP_VIEW_OF_FILE = linker.downcallHandle(
 			k32.find("MapViewOfFile").orElseThrow(), FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG)
@@ -121,8 +126,16 @@ public final class SkyLink {
 		lastOpenAttempt = now;
 		try (Arena arena = Arena.ofConfined()) {
 			MemorySegment name = arena.allocateFrom(MAPPING_NAME, StandardCharsets.UTF_16LE);
-			MemorySegment handle = (MemorySegment) OPEN_FILE_MAPPING.invokeExact(FILE_MAP_ALL_ACCESS, 0, name);
+			MemorySegment handle = (MemorySegment) OPEN_FILE_MAPPING.invokeExact(OPEN_STATE, FILE_MAP_ALL_ACCESS, 0, name);
 			if (handle.address() == 0) {
+				// Say why, once per reason: 2 is "Skyrim hasn't made it yet" (normal while it loads),
+				// 5 is "not allowed" (a Skyrim run as administrator, before 0.1.1).
+				int error = (int) LAST_ERROR.get(OPEN_STATE, 0L);
+				if (error != lastOpenError) {
+					lastOpenError = error;
+					SkyCraft.LOG.info("SkyCraft: can't open Skyrim's shared memory yet (Windows error {}{})", error,
+						error == 2 ? ": Skyrim hasn't created it yet" : error == 5 ? ": access denied; is Skyrim running as administrator?" : "");
+				}
 				return;
 			}
 			MemorySegment view = (MemorySegment) MAP_VIEW_OF_FILE.invokeExact(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0L);

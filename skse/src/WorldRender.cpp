@@ -1,3 +1,4 @@
+#include "Dig.h"
 #include "Game.h"
 
 #include "Collision.h"
@@ -1087,6 +1088,7 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
 						ClearAvatar();
 						BlockLights::Clear();
 						NpcBlocks::Clear();
+						Dig::Clear();
 						break;
 					case proto::kRenLights:
 						BlockLights::OnLights(a_data, a_bytes);
@@ -1096,6 +1098,9 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
 						break;
 					case proto::kRenSolids:
 						NpcBlocks::OnSolids(a_data, a_bytes);
+						break;
+					case proto::kRenDug:
+						Dig::OnDug(a_data, a_bytes);
 						break;
 					case proto::kRenTexture:
 						OnTexture(a_data, a_bytes);
@@ -3196,6 +3201,8 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
 				return;
 			}
 			DrainMessages(a_context);
+			Dig::ServiceReadbacks(a_device, a_context);
+			Dig::ServiceGrass(a_device, a_context);
 			ReadProbe(a_context);
 			const bool drawnInFrame = std::exchange(inFrameDrawn, false);
 

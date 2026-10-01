@@ -31,6 +31,20 @@ public final class SkyCollision {
 	private static final int FILL_UPPER = 1 << 11;
 	private static final int FILL_TOP_SHIFT = 12; // highest occupied of the 8 voxel layers (3 bits)
 	private static final ConcurrentHashMap<Long, SkyTri[]> TRIS = new ConcurrentHashMap<>();
+	// Diggable surfaces as they were before blocks were dug out of them (Proto.TRI_GHOST).
+	private static final ConcurrentHashMap<Long, SkyTri[]> GHOSTS = new ConcurrentHashMap<>();
+	// A hash of each region's triangles as last received, and the regions whose triangles changed
+	// since the client last looked (the walls of dug holes are drawn from them).
+	private static final ConcurrentHashMap<Long, Long> TRI_HASH = new ConcurrentHashMap<>();
+	private static final java.util.concurrent.ConcurrentLinkedQueue<Long> CHANGED = new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+	/** Regions (min corner, as BlockPos longs) whose triangles changed since the last call. */
+	public static void takeChangedRegions(java.util.function.LongConsumer out) {
+		Long key;
+		while ((key = CHANGED.poll()) != null) {
+			out.accept(key);
+		}
+	}
 	private static volatile java.util.function.Predicate<net.minecraft.world.entity.Entity> smoothCollider = e -> false;
 	private static final Set<Long> KNOWN_REGIONS = ConcurrentHashMap.newKeySet();
 	private static volatile int epoch = -1;
@@ -64,6 +78,39 @@ public final class SkyCollision {
 			for (int ry = ry0; ry <= ry1; ry++) {
 				for (int rz = rz0; rz <= rz1; rz++) {
 					SkyTri[] tris = TRIS.get(regionKey(rx, ry, rz));
+					if (tris == null) {
+						continue;
+					}
+					for (SkyTri t : tris) {
+						if (t.maxX >= box.minX && t.minX <= box.maxX && t.maxY >= box.minY && t.minY <= box.maxY && t.maxZ >= box.minZ && t.minZ <= box.maxZ) {
+							out.add(t);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	/**
+	 * Every Skyrim surface whose bounds overlap {@code box} as it was before anything was dug out
+	 * of it: what's behind these is inside Skyrim's geometry (SkyDig).
+	 */
+	public static void originalSurfacesNear(net.minecraft.world.phys.AABB box, java.util.List<SkyTri> out) {
+		trianglesNear(box, out);
+		near(GHOSTS, box, out);
+	}
+
+	private static void near(ConcurrentHashMap<Long, SkyTri[]> store, net.minecraft.world.phys.AABB box, java.util.List<SkyTri> out) {
+		if (store.isEmpty()) {
+			return;
+		}
+		int rx0 = Math.floorDiv((int) Math.floor(box.minX), REGION_SIZE), rx1 = Math.floorDiv((int) Math.floor(box.maxX), REGION_SIZE);
+		int ry0 = Math.floorDiv((int) Math.floor(box.minY), REGION_SIZE), ry1 = Math.floorDiv((int) Math.floor(box.maxY), REGION_SIZE);
+		int rz0 = Math.floorDiv((int) Math.floor(box.minZ), REGION_SIZE), rz1 = Math.floorDiv((int) Math.floor(box.maxZ), REGION_SIZE);
+		for (int rx = rx0; rx <= rx1; rx++) {
+			for (int ry = ry0; ry <= ry1; ry++) {
+				for (int rz = rz0; rz <= rz1; rz++) {
+					SkyTri[] tris = store.get(regionKey(rx, ry, rz));
 					if (tris == null) {
 						continue;
 					}
@@ -223,6 +270,8 @@ public final class SkyCollision {
 		SHAPES.clear();
 		FILL.clear();
 		TRIS.clear();
+		GHOSTS.clear();
+		TRI_HASH.clear();
 		KNOWN_REGIONS.clear();
 		epoch = newEpoch;
 		SkyCraft.LOG.info("SkyCraft: collision cleared (epoch {})", newEpoch);
@@ -294,20 +343,39 @@ public final class SkyCollision {
 			return;
 		}
 		SkyTri[] tris = new SkyTri[count];
+		java.util.List<SkyTri> ghosts = new java.util.ArrayList<>();
 		float[] v = new float[9];
 		int kept = 0;
+		long hash = count;
 		long e = p + COL_REGION_HEADER_BYTES;
 		for (int i = 0; i < count; i++, e += COL_TRI_BYTES) {
 			for (int k = 0; k < 9; k++) {
 				v[k] = s.get(JAVA_FLOAT, e + k * 4L);
+				hash = hash * 31 + Float.floatToRawIntBits(v[k]);
 			}
 			int flags = s.get(JAVA_INT, e + 36);
-			SkyTri t = new SkyTri(v, 0, (flags & TRI_STAIR_HELPER) != 0);
-			if (!t.degenerate()) {
+			hash = hash * 31 + flags;
+			SkyTri t = new SkyTri(v, 0, flags);
+			if (t.degenerate()) {
+				continue;
+			}
+			if ((flags & TRI_GHOST) != 0) {
+				ghosts.add(t);
+			} else {
 				tris[kept++] = t;
 			}
 		}
-		TRIS.put(regionKey(Math.floorDiv(minX, REGION_SIZE), Math.floorDiv(minY, REGION_SIZE), Math.floorDiv(minZ, REGION_SIZE)), java.util.Arrays.copyOf(tris, kept));
+		long region = regionKey(Math.floorDiv(minX, REGION_SIZE), Math.floorDiv(minY, REGION_SIZE), Math.floorDiv(minZ, REGION_SIZE));
+		if (ghosts.isEmpty()) {
+			GHOSTS.remove(region);
+		} else {
+			GHOSTS.put(region, ghosts.toArray(new SkyTri[0]));
+		}
+		TRIS.put(region, java.util.Arrays.copyOf(tris, kept));
+		Long before = TRI_HASH.put(region, hash);
+		if (before == null || before != hash) {
+			CHANGED.add(BlockPos.asLong(minX, minY, minZ));
+		}
 	}
 
 	public static int triangleCount() {

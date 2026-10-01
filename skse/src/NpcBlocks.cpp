@@ -23,6 +23,9 @@ namespace skycraft
 		constexpr float kRange = 4000.0f;          // Skyrim units from the player
 		constexpr float kMaxRadiusBlocks = 0.45f;  // wider actors still fit through a one-block gap
 		constexpr float kSlideSpeed = 3.2f;        // blocks a second along a wall
+		// Havok keeps NPCs just clear of blocks now (DigPhysics.cpp); a wall this close still counts
+		// as walked into, so they follow it round.
+		constexpr double kTouchBlocks = 0.1;
 
 		// An NPC following a wall around: which way (+1/-1 along the wall) and for how long more.
 		struct Detour
@@ -160,7 +163,7 @@ namespace skycraft
 				}
 				const auto   sky = actor->GetPosition();
 				const auto   mc = SkyToMc(sky);
-				const double r = std::clamp(double(actor->GetBoundRadius()) / proto::kUnitsPerBlock, 0.2, double(kMaxRadiusBlocks));
+				const double r = std::clamp(double(actor->GetBoundRadius()) / proto::kUnitsPerBlock, 0.2, double(kMaxRadiusBlocks)) + kTouchBlocks;
 				const double h = std::clamp(double(actor->GetHeight()) / proto::kUnitsPerBlock, 0.5, 4.0);
 				// From just above the feet (standing on a block is fine) to the head.
 				const int y0 = int(std::floor(mc.y + 0.3)), y1 = int(std::floor(mc.y + h - 0.1));

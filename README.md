@@ -22,6 +22,11 @@ shared memory. Minecraft runs hidden in the background, and Skyrim draws everyth
 - **Blocks:** place and break blocks anywhere in Skyrim. They're drawn inside Skyrim's frame
   with its sun, shadows, fog and weather. Minecraft lights (torches, lava, glowstone and so on)
   light up Skyrim.
+- **Digging into Skyrim:** mine Skyrim's ground, rocks, roads and objects like Minecraft blocks.
+  What you dig out drops as the block it's made of (dirt under grass, then stone with ores, then
+  bedrock), and the hole is real for you, NPCs and items. TNT, creepers and other explosions blow
+  craters into Skyrim. Interiors and caves are solid stone behind their walls. What you dig is
+  saved in your Minecraft world.
 - **Block entities:** chests, beds, banners, heads, shulker boxes and similar blocks are drawn,
   and pistons move blocks.
 - **Water and lava:** they flow over Skyrim's terrain, and Skyrim water swims like Minecraft
@@ -140,6 +145,15 @@ Every other key is Minecraft's: **E** inventory, **F5** camera, **T** chat, **/*
 
 - If something goes wrong, `Documents\My Games\Skyrim Special Edition\SKSE\SkyCraft.log` says what.
   For bug reports, set `bDiagnostics = 1` in `SkyCraft.ini` for detailed logs.
+- **Stuck on "SkyCraft: starting Minecraft..."?** After a minute SkyCraft says which of these it is:
+  - Prism Launcher is still busy. Alt-Tab to it: it may be downloading, or need you to sign in,
+    or show an error.
+  - Minecraft closed. Its log is
+    `%LOCALAPPDATA%\SkyCraft\Prism\instances\SkyCraft\.minecraft\logs\latest.log`.
+  - Minecraft is running but not responding. Please report it, with `SkyCraft.log` and that
+    `latest.log`.
+
+  You need to own Minecraft: Java Edition.
 
 - Skyrim's opening (cart ride and Helgen) may leave you stuck. Use
   [Alternate Start](https://www.nexusmods.com/skyrimspecialedition/mods/272) or a save made after Helgen.
