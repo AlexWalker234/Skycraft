@@ -1,5 +1,6 @@
 #include "Dig.h"
 #include "Game.h"
+#include "Perf.h"
 
 // Skyrim's NPCs in a dug-up world. Every actor moves with a Havok character proxy: it collects
 // contact points with the world (bhkCharacterPointCollector), turns them into surface planes, and
@@ -86,6 +87,7 @@ namespace skycraft::Dig
 		{
 			static void thunk(RE::bhkCharacterPointCollector* a_this, const RE::hkpCdPoint& a_point)
 			{
+				Perf::Scope timer(Perf::kHookCharContacts);
 				if (Any() && OnDugGround(a_point)) {
 					if (loggedDropped.fetch_add(1) < 3) {
 						logger::info("dig: an actor's contact with dug-away ground dropped");
@@ -107,6 +109,7 @@ namespace skycraft::Dig
 		{
 			static void thunk(RE::hkpAllCdPointCollector* a_this, const RE::hkpCdPoint& a_point)
 			{
+				Perf::Scope timer(Perf::kHookContacts);
 				if (Any() && OnDugGround(a_point)) {
 					return;
 				}
@@ -208,6 +211,7 @@ namespace skycraft::Dig
 		{
 			static void thunk(RE::bhkCharProxyController* a_this, RE::hkpCharacterProxy* a_proxy, const RE::hkArray<RE::hkpRootCdPoint>& a_manifold, RE::hkpSimplexSolverInput& a_input)
 			{
+				Perf::Scope timer(Perf::kHookPlanes);
 				const int before = a_input.numConstraints;
 				func(a_this, a_proxy, a_manifold, a_input);
 				if (!a_proxy || !a_proxy->shapePhantom || !a_input.constraints) {
@@ -276,6 +280,7 @@ namespace skycraft::Dig
 		{
 			static bool thunk(RE::TES* a_tes, const RE::NiPoint3& a_pos, float& a_height)
 			{
+				Perf::Scope timer(Perf::kHookLand);
 				const bool found = func(a_tes, a_pos, a_height);
 				if (Any() && a_height > a_pos.z) {
 					const auto actor = SkyToMc(a_pos);

@@ -26,7 +26,8 @@ shared memory. Minecraft runs hidden in the background, and Skyrim draws everyth
   What you dig out drops as the block it's made of (dirt under grass, then stone with ores, then
   bedrock), and the hole is real for you, NPCs and items. TNT, creepers and other explosions blow
   craters into Skyrim. Interiors and caves are solid stone behind their walls. What you dig is
-  saved in your Minecraft world.
+  saved in your Minecraft world. **Skyrim destruction: On/Off** in the top left of the pause menu
+  (O) turns it off (holes already dug stay).
 - **Block entities:** chests, beds, banners, heads, shulker boxes and similar blocks are drawn,
   and pistons move blocks.
 - **Water and lava:** they flow over Skyrim's terrain, and Skyrim water swims like Minecraft

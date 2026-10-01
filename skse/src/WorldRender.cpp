@@ -1,5 +1,6 @@
 #include "Dig.h"
 #include "Game.h"
+#include "Perf.h"
 
 #include "Collision.h"
 
@@ -3024,6 +3025,7 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
 			static void thunk(bool a_unk)
 			{
 				func(a_unk);
+				Perf::Scope timer(Perf::kInFrame);
 				DrawInFrame();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -3200,9 +3202,16 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
 			if (!Init(a_device)) {
 				return;
 			}
+			Perf::Scope timer(Perf::kDraw);
 			DrainMessages(a_context);
-			Dig::ServiceReadbacks(a_device, a_context);
-			Dig::ServiceGrass(a_device, a_context);
+			{
+				Perf::Scope readbacks(Perf::kReadbacks);
+				Dig::ServiceReadbacks(a_device, a_context);
+			}
+			{
+				Perf::Scope grass(Perf::kGrass);
+				Dig::ServiceGrass(a_device, a_context);
+			}
 			ReadProbe(a_context);
 			const bool drawnInFrame = std::exchange(inFrameDrawn, false);
 

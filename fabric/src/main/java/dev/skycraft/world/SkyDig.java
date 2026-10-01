@@ -171,7 +171,7 @@ public final class SkyDig {
 	 */
 	public static void open(ServerPlayer player, int world, BlockPos pos, int material) {
 		ServerLevel level = player.level();
-		if (!inReach(player, pos, REACH) || !level.isLoaded(pos) || player.isSpectator()) {
+		if (!destruction || !inReach(player, pos, REACH) || !level.isLoaded(pos) || player.isSpectator()) {
 			return;
 		}
 		LevelChunk chunk = level.getChunkAt(pos);
@@ -195,6 +195,9 @@ public final class SkyDig {
 
 	/** Cells around a mined one that are wholly inside Skyrim's geometry: blocks now. */
 	public static void reveal(ServerPlayer player, int world, List<BlockPos> cells, int[] materials) {
+		if (!destruction) {
+			return;
+		}
 		ServerLevel level = player.level();
 		for (int i = 0; i < cells.size() && i < materials.length; i++) {
 			BlockPos pos = cells.get(i);
@@ -203,6 +206,14 @@ public final class SkyDig {
 			}
 		}
 	}
+
+	/**
+	 * Whether Minecraft digs into Skyrim at all: the pause menu's "Skyrim destruction" button, saved
+	 * in config/skycraft.properties. Off, mining Skyrim's surfaces and explosions leave it alone (and
+	 * breaking blocks in old holes digs no further); holes already dug stay. In a friend's world it's
+	 * the host's setting that counts (their server does the digging).
+	 */
+	public static volatile boolean destruction = true;
 
 	/** Marks a cell dug out of Skyrim's geometry (in that Skyrim world). Returns false if it was already. */
 	public static boolean markDug(ServerLevel level, int world, BlockPos pos) {
@@ -333,6 +344,9 @@ public final class SkyDig {
 		// that by block column.
 		private @Nullable List<SkyTri> column;
 		private final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<List<SkyTri>> columns = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
+		// Per block: the surfaces that could be within SEARCH of a point in it. A blast's probe holds
+		// thousands, nearly all far from any one point; kept in this.tris's order (ties go the same way).
+		private final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<List<SkyTri>> nearCells = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
 
 		/** Gathers the surfaces around a box (MC coords) once, for many tests inside it. */
 		public Probe around(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
@@ -341,6 +355,7 @@ public final class SkyDig {
 			this.tris.clear();
 			this.column = null;
 			this.columns.clear();
+			this.nearCells.clear();
 			this.boxMinX = minX;
 			this.boxMinY = minY;
 			this.boxMinZ = minZ;
@@ -390,7 +405,14 @@ public final class SkyDig {
 			SkyTri nearest = null;
 			double best = SEARCH * SEARCH;
 			double bx = 0, by = 0, bz = 0;
-			for (SkyTri t : this.tris) {
+			for (SkyTri t : nearCell(px, py, pz)) {
+				// Its box already farther than the best so far: it can't be nearer.
+				double ex = Math.max(0.0, Math.max(t.minX - px, px - t.maxX));
+				double ey = Math.max(0.0, Math.max(t.minY - py, py - t.maxY));
+				double ez = Math.max(0.0, Math.max(t.minZ - pz, pz - t.maxZ));
+				if (ex * ex + ey * ey + ez * ez >= best) {
+					continue;
+				}
 				closestPoint(t, px, py, pz, this.q);
 				double dx = px - this.q[0], dy = py - this.q[1], dz = pz - this.q[2];
 				double d2 = dx * dx + dy * dy + dz * dz;
@@ -450,6 +472,23 @@ public final class SkyDig {
 				return above.material == DIG_NONE ? DIG_STONE : above.material;
 			}
 			return above != null || landBelow ? AIR : DIG_STONE;
+		}
+
+		private List<SkyTri> nearCell(double px, double py, double pz) {
+			int cx = (int) Math.floor(px), cy = (int) Math.floor(py), cz = (int) Math.floor(pz);
+			long key = net.minecraft.core.BlockPos.asLong(cx, cy, cz);
+			List<SkyTri> list = this.nearCells.get(key);
+			if (list == null) {
+				list = new ArrayList<>();
+				for (SkyTri t : this.tris) {
+					if (t.maxX >= cx - SEARCH && t.minX <= cx + 1 + SEARCH && t.maxY >= cy - SEARCH && t.minY <= cy + 1 + SEARCH && t.maxZ >= cz - SEARCH
+						&& t.minZ <= cz + 1 + SEARCH) {
+						list.add(t);
+					}
+				}
+				this.nearCells.put(key, list);
+			}
+			return list;
 		}
 
 		/** The surfaces over or under the block column holding (x, z). */

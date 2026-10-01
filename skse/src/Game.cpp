@@ -2,6 +2,7 @@
 
 #include "Collision.h"
 #include "Dig.h"
+#include "Perf.h"
 
 namespace skycraft
 {
@@ -994,17 +995,22 @@ namespace skycraft
 
 			settleTimer -= a_delta;
 			if (haveMc && !loading && cell && settleTimer <= 0.0f) {
+				Perf::Scope timer(Perf::kCollision);
 				Collision::Get().Update(puppet ? McVec{ mc.x, mc.y, mc.z } : skyMc);
 			}
 
 			static int waterFrame = 0;
 			if (haveMc && st.mcInWorld && !loading && cell && ++waterFrame % 3 == 0) {
+				Perf::Scope timer(Perf::kWater);
 				WriteWaterGrid(a_player, puppet ? McVec{ mc.x, mc.y, mc.z } : skyMc, worldId);
 			}
 
 			// Minecraft's torches, lava and glowstone light Skyrim's world while Minecraft is there.
 			const McVec lightCentre = puppet ? McVec{ mc.x, mc.y, mc.z } : skyMc;
-			BlockLights::Update(haveMc && st.mcInWorld && !loading && cell ? &lightCentre : nullptr, a_delta);
+			{
+				Perf::Scope timer(Perf::kLights);
+				BlockLights::Update(haveMc && st.mcInWorld && !loading && cell ? &lightCentre : nullptr, a_delta);
+			}
 
 			// Blocks dug out of Skyrim's world: its collision around them goes to Minecraft again, and
 			// its meshes are cut.
@@ -1012,12 +1018,16 @@ namespace skycraft
 			dugChanged.clear();
 			Dig::TakeChanged(dugChanged);
 			if (!dugChanged.empty()) {
+				Perf::Scope timer(Perf::kDigChanged);
 				Collision::Get().DigChanged(dugChanged);
 			}
 			// Not while the world is still settling after a load (its cells are still being attached).
 			static float digSettled = 0.0f;
 			digSettled = puppet && !loading && cell ? digSettled + a_delta : 0.0f;
-			Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
+			{
+				Perf::Scope timer(Perf::kDigMeshes);
+				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
+			}
 
 			ReportMinecraft(mcAlive, cell && !loading && !menu, a_delta);
 		}
@@ -1028,10 +1038,12 @@ namespace skycraft
 			{
 				func(a_this, a_delta);
 				try {
+					Perf::Scope timer(Perf::kUpdate);
 					PerFrame(a_this, a_delta);
 				} catch (const std::exception& e) {
 					logger::error("per-frame update: {}", e.what());
 				}
+				Perf::Report();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};

@@ -67,8 +67,8 @@ public final class SkyDigClient {
 			return false;
 		}
 		GameType mode = minecraft.gameMode.getPlayerMode();
-		if (mode == GameType.ADVENTURE || mode == GameType.SPECTATOR) {
-			return false;
+		if (mode == GameType.ADVENTURE || mode == GameType.SPECTATOR || (!SkyDig.destruction && minecraft.hasSingleplayerServer())) {
+			return false; // (a guest asks anyway: the host's setting decides)
 		}
 		SkyRay.Hit hit = result.hit;
 		if (hit.tri() == null || !hit.tri().diggable) {
@@ -122,7 +122,7 @@ public final class SkyDigClient {
 		if (minecraft.player == null || minecraft.player.blockPosition().distSqr(pos) > REVEAL_RANGE * REVEAL_RANGE) {
 			return;
 		}
-		if (SkyDig.isDug(level, world(), pos)) {
+		if (SkyDig.isDug(level, world(), pos) && (SkyDig.destruction || !minecraft.hasSingleplayerServer())) {
 			REVEAL.put(pos.asLong(), REVEAL_TRIES);
 		}
 	}
