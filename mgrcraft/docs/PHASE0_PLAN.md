@@ -2,7 +2,8 @@
 
 The feasibility report (`/mnt/project-files/mgrr-phase0-feasibility.md`, 2026-10-02) settled the static
 questions from the exe on disk. A working x86 `dinput8.dll` proxy now loads in the game and keeps
-`Local\MGRCraft_v1` alive. This plan covers the **runtime** questions from the prompt's §7 that are still
+`Local\MGRCraft_v1` alive. Runtime results so far are in `/mnt/project-files/mgrr-runtime-findings.md`
+(2026-10-03). This plan covers the **runtime** questions from the prompt's §7 that are still
 open, in the order they unblock each other.
 
 Ground rules (from the prompt):
@@ -20,60 +21,34 @@ for frame captures. RenderDoc doesn't support Direct3D 9, so it can't be used he
 
 | # | Item | Status |
 |---|---|---|
-| 1 | Build identification | Mostly done. **Missing: SHA-256 pin** |
-| 2 | Injection vector | Done (`dinput8.dll` proxy loads) |
-| 3 | Frame hook | Next |
-| 4 | Raiden entity | Open |
+| 1 | Build identification | **Done** (SHA-256 pinned in the proxy) |
+| 2 | Injection vector | **Done** (`dinput8.dll` proxy loads) |
+| 3 | Frame hook | **Done** (IAT patch of `Direct3DCreate9`, Present on the game's only thread) |
+| 4 | Raiden entity | **Next** |
 | 5 | Animation / state driving | Open |
 | 6 | Blade Mode internals | Open (the point of the project) |
 | 7 | Camera | Open |
 | 8 | Rendering and depth | Open |
-| 9 | Input | Imports known; device setup open |
+| 9 | Input | **Done** (both devices polled with `GetDeviceState`; pads via XInput 1.3) |
 | 10 | Scale and axes | Open |
 | 11 | Risk table and verdict | After 3 to 10 |
 | §5 | Host stage | Open |
 
 ---
 
-## 1. Build identification (finish)
+## 1. Build identification: done
 
-**Why:** the prompt forbids hooking an unrecognized build, so the hash gate is needed before item 3's
-first hook.
+SHA-256 `7174741F46AB4C222304B0F1B9291A2281D53368016347E65D2EA404FF07AD34` (26,347,008 bytes), pinned in
+the proxy. On a mismatch the proxy only forwards `DirectInput8Create`: no hooks, no shared memory.
 
-Run in PowerShell:
-```powershell
-cd "C:\Program Files (x86)\Steam\steamapps\common\METAL GEAR RISING REVENGEANCE"   # or your library path
-Get-FileHash -Algorithm SHA256 "METAL GEAR RISING REVENGEANCE.exe"
-(Get-Item "METAL GEAR RISING REVENGEANCE.exe").VersionInfo | Format-List FileVersion,ProductVersion
-```
-**Paste back:** the hash and both version strings. The proxy then compares the running exe's SHA-256 (via
-`BCryptHashData`) against a table holding that one hash. If it doesn't match, the proxy forwards
-`DirectInput8Create` and does nothing else.
+## 3. Frame hook: done
 
-## 3. Frame hook
-
-**Approach (no address hunting needed):** we load before the game creates its device, so patch the exe's
-import of `d3d9!Direct3DCreate9` (its IAT entry). Wrap the returned `IDirect3D9`'s `CreateDevice`, then
-hook the new device's vtable:
-
-| Method | vtable index | Use |
-|---|---|---|
-| `Reset` | 16 | Release/recreate our `D3DPOOL_DEFAULT` resources (Alt-Tab, resolution change) |
-| `Present` | 17 | Per-frame tick, heartbeat, overlay draw |
-| `EndScene` | 42 | Fallback draw point if `Present` is too late |
-
-Experiment `bFrameLog=1` logs: the `D3DPRESENT_PARAMETERS` passed to `CreateDevice` (back-buffer size and
-format, depth format, windowed or not), the creating thread id, the thread calling `Present`, frames per
-second every 5 s, and every `Reset`.
-
-**Paste back:** the proxy's log after starting the game, reaching a stage, pausing, Alt-Tabbing out and back,
-then quitting.
-
-**Done when:** the heartbeat moves onto `Present` and keeps beating through menus and pauses, and Minecraft
-sees it stop if the render thread hangs.
-
-**Fallback:** if the IAT patch misses (the device made through another path), create a throwaway device
-on a hidden window inside the proxy, read its vtable, and hook the same indices.
+The exe's IAT entry for `d3d9!Direct3DCreate9` is patched, then `CreateDevice`, then the device's
+`Reset` (16), `Present` (17) and `EndScene` (42). Measured: 1280x720 windowed, A8R8G8B8, **MSAA 2x**, auto
+D24S8 depth, immediate present interval (the game caps itself at 60 fps), two `EndScene`s per gameplay
+frame. **One thread** creates the device, polls input and calls `Present`, so anything written at
+`Present` time (Raiden's position, synthetic input) lands between two simulation steps without locks.
+The heartbeat and `MgrState` are written on every `Present`.
 
 ## 4. Raiden's entity
 
@@ -99,17 +74,23 @@ signature instead, at our own `Present` time.
 
 ## 5. Animation and state driving
 
-The proxy already owns the input path (DirectInput, with XInput to follow), which makes option (b) from
-the prompt the cheapest:
+The proxy already owns the input path, which makes option (b) from the prompt the cheapest. The game
+polls both DirectInput devices with `GetDeviceState`, so synthetic keys and mouse deltas are an overwrite
+of the caller's buffer after the real call. Keyboard only gives full-speed directions, though, and walk
+versus run needs a stick magnitude. So movement goes through XInput instead: patch the exe's IAT entry for
+`XInputGetState` (ordinal 2 of `xinput1_3.dll`) and, for user index 0, report a connected pad whose left
+stick carries Minecraft's movement direction and speed. A real pad's other buttons pass through.
 
 - **(b) Synthetic input:** feed MGR the stick direction and magnitude that match Minecraft's movement,
   so MGR picks and plays its own idle, walk, run and jump animations. Then overwrite the position each
   frame from Minecraft (item 4). No animation internals needed.
 
-Test (b) first: experiment `bSyntheticStick=1` holds the left stick forward at 50% then 100% for 3 s each
-and logs Raiden's position (from item 4) each frame.
+Test (b) first: experiment `bSyntheticStick=1` holds the virtual left stick forward at 30%, 60% and 100%
+for 3 s each and logs Raiden's position (from item 4) each frame. Check first that the game polls
+`XInputGetState` every frame even with no pad plugged in; if it stops polling after an
+`ERROR_DEVICE_NOT_CONNECTED`, report the virtual pad as connected from the first call.
 
-**Paste back:** the log, and whether he walked then ran.
+**Paste back:** the log, and at which stick values he walked and ran.
 
 Only if (b) can't express something Minecraft does (sneaking, swimming, falling without jumping) look
 for the state field:
@@ -157,30 +138,35 @@ holding view-projection, and step 3's answer.
 
 ## 8. Rendering and depth
 
-The `bFrameLog` hook from item 3 gets one more switch, `bFrameDump=1`: for a single frame after F10, log
+The depth buffer is the game's auto D24S8 surface, and it's **multisampled (MSAA 2x)**. Direct3D 9 can't
+sample a multisampled depth surface or resolve it with `StretchRect`, so reading the game's depth as a
+texture (INTZ) is off the table unless MSAA is turned off. The default plan is therefore to draw
+Minecraft's blocks **inside the game's scene**, with the game's own depth surface bound, before its
+post-processing. The frame dump finds that point.
+
+The frame hook from item 3 gets one more switch, `bFrameDump=1`: for a single frame after F10, log
 every `SetRenderTarget`, `SetDepthStencilSurface`, `Clear` and `StretchRect` with the surfaces' size and
-format, plus the number of draw calls between them. It also logs whether `INTZ` and `DF24` depth textures
-are supported (`CheckDeviceFormat`).
+format, plus the number of draw calls between them and which of the two `EndScene`s each belongs to. It also
+logs whether `INTZ` is supported (`CheckDeviceFormat`), for the case where MSAA gets turned off.
 
 **Paste back:** that dump (in a stage, not a menu).
 
 What it decides:
-- Where the main 3D pass ends and post-processing begins. That's where Minecraft's blocks get drawn,
-  against the game's own depth buffer.
-- Whether that depth is a plain surface (then the blocks share it in the same pass) or already a
-  readable texture.
+- Where the main 3D pass ends and post-processing begins (likely around the first of the two
+  `EndScene`s). That's where Minecraft's blocks get drawn, against the game's own depth surface.
+- Whether the game renders into its own render targets first (then the blocks go in before it resolves
+  them to the back buffer).
 
-## 9. Input
+## 9. Input: done
 
-Already known from the imports: DirectInput 8 (keyboard and mouse) and XInput 1.3 by ordinal (gamepad).
-Still open is how the game reads them.
-
-Experiment `bInputLog=1` in the proxy wraps `IDirectInput8::CreateDevice` and logs each device's GUID,
-data format, cooperative level, and whether the game polls (`GetDeviceState`) or reads buffered input
-(`GetDeviceData`). It also patches the exe's IAT entries for XInput ordinals 2, 3 and 4 and logs the first
-call to each.
-
-**Paste back:** the log after a minute in a stage with keyboard, mouse and (if you have one) a pad.
+`DirectInput8Create(0x800)`, then a keyboard (`c_dfDIKeyboard`, 256 bytes) and a mouse (`DIMOUSESTATE2`,
+20 bytes), both `DISCL_NONEXCLUSIVE | DISCL_FOREGROUND` and both polled with `GetDeviceState` (never
+`GetDeviceData`). Pads go through XInput 1.3. For the input bridge this means:
+- Swallowing input from MGR is zeroing bytes in the `GetDeviceState` buffer; forwarding to Minecraft is
+  copying the real buffer into the input ring first.
+- Blade Mode keys stay in the buffer while Blade Mode is active (the prompt's §6 routing).
+- `DISCL_FOREGROUND` means MGR loses input when unfocused, which suits SkyCraft's model (the host
+  window keeps focus, Minecraft stays hidden).
 
 ## 10. Scale and axes
 
@@ -216,4 +202,4 @@ with changes" or "stop and rethink". Current read:
 | Freezing Raiden's position makes him jitter | Medium | Medium | Patch the integrator instead |
 | No room in the 2 GB address space | Medium | High | Keep the mapping small; never apply a LAA patch without asking |
 | Blade Mode can't be entered without an enemy | Low to medium | High | An invisible dummy target, or the gating flag |
-| D3D9 depth isn't readable | Low | Medium | Draw blocks in the same pass with the game's depth surface |
+| Game depth is multisampled, so not readable as a texture | Known | Medium | Draw blocks inside the game's scene with its depth surface bound (item 8) |
